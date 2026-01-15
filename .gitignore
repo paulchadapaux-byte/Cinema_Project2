@@ -205,3 +205,60 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+# ==========================================
+# DONNÉES
+# ==========================================
+# Fichiers volumineux
+data/raw/*.tsv.gz
+data/raw/*.tsv
+data/processed/*.parquet
+
+# Garder la structure des dossiers
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# ==========================================
+# PYTHON
+# ==========================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+env/
+venv/
+ENV/
+.venv
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# ==========================================
+# IDE
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ==========================================
+# OS
+# ==========================================
+.DS_Store
+Thumbs.db
+
+# ==========================================
+# STREAMLIT
+# ==========================================
+.streamlit/secrets.toml
+
+# ==========================================
+# AUTRES
+# ==========================================
+*.log
+*.tmp
+.env
