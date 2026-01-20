@@ -3,6 +3,7 @@ Fonctions utilitaires pour l'application Streamlit Cinéma Creuse
 Inclut les appels API TMDb pour enrichissement des films
 """
 
+import json
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -13,6 +14,7 @@ from pathlib import Path
 import numpy as np
 from difflib import SequenceMatcher
 import unicodedata
+from datetime import datetime
 
 # ==========================================
 # GESTION DES TITRES BILINGUES
@@ -510,6 +512,43 @@ def get_films_affiche_enrichis():
             return FILMS_AFFICHE_CACHE
         except:
             return []
+
+
+def separer_films_par_statut(films_list):
+    """
+    Sépare les films entre ceux déjà en salles et ceux à venir
+    basé sur la date de sortie vs date actuelle (dynamique)
+    
+    Args:
+        films_list: Liste de films avec date_sortie
+        
+    Returns:
+        tuple: (films_en_salles, films_a_venir)
+    """
+    from datetime import datetime
+    
+    en_salles = []
+    a_venir = []
+    date_reference = datetime.now()
+    
+    for film in films_list:
+        try:
+            date_sortie_str = film.get('date_sortie', '')
+            if date_sortie_str:
+                date_sortie = datetime.strptime(date_sortie_str, '%Y-%m-%d')
+                
+                if date_sortie <= date_reference:
+                    en_salles.append(film)
+                else:
+                    a_venir.append(film)
+            else:
+                # Si pas de date, considérer comme en salles
+                en_salles.append(film)
+        except:
+            # En cas d'erreur, mettre en salles
+            en_salles.append(film)
+    
+    return en_salles, a_venir
 
 
 def enrich_movie_with_tmdb(movie_row):
@@ -1528,7 +1567,7 @@ def calculate_film_similarity_score(film, liked_genres, disliked_film_ids):
 
 def get_personalized_recommendations(df_movies, liked_films, disliked_films, top_n=20):
     """
-    Génère des recommandations personnalisées basées sur les films aimés
+    Génère des recommandations personnalisées basées sur KNN (K-Nearest Neighbors)
     
     Args:
         df_movies: DataFrame de tous les films disponibles
@@ -1539,9 +1578,12 @@ def get_personalized_recommendations(df_movies, liked_films, disliked_films, top
     Returns:
         DataFrame: Films recommandés avec scores
     """
+    from sklearn.neighbors import NearestNeighbors
+    from sklearn.preprocessing import MultiLabelBinarizer
+    import numpy as np
+    
     # Si aucun film aimé, retourner les films populaires
     if len(liked_films) == 0:
-        # Retourner les films les mieux notés avec beaucoup de votes
         popular = df_movies[
             (df_movies['note'] >= 7.0) & 
             (df_movies['votes'] >= 50000)
@@ -1549,68 +1591,551 @@ def get_personalized_recommendations(df_movies, liked_films, disliked_films, top
         
         popular['score_popularite'] = popular['note'] * np.log10(popular['votes'] + 1)
         popular = popular.sort_values('score_popularite', ascending=False)
+        popular['score_recommandation'] = 80.0
         
         return popular.head(top_n)
     
-    # Extraire les genres préférés
-    liked_genres = []
-    for _, film_data in liked_films:
-        genres = film_data.get('genres', [])
-        if isinstance(genres, list):
-            liked_genres.extend(genres)
-        elif isinstance(genres, str):
-            liked_genres.extend([g.strip() for g in genres.split(',')])
+    # Extraire les IDs des films aimés
+    liked_ids = set([str(film_id) for film_id, _ in liked_films])
+    disliked_ids = set([str(film_id) for film_id, _ in disliked_films])
+    watched_ids = liked_ids.union(disliked_ids)
     
-    # Compter les occurrences et garder les plus fréquents
-    from collections import Counter
-    genre_counts = Counter(liked_genres)
-    top_genres = [genre for genre, count in genre_counts.most_common(5)]
+    # Préparer les features pour KNN
+    # 1. Encoder les genres avec MultiLabelBinarizer
+    all_genres = []
+    for idx, row in df_movies.iterrows():
+        genres = row.get('genre', [])
+        if isinstance(genres, list) and len(genres) > 0:
+            all_genres.append(genres)
+        else:
+            all_genres.append([])
     
-    # IDs des films déjà vus (aimés ou pas aimés) à exclure
-    watched_ids = set()
+    mlb = MultiLabelBinarizer()
+    genre_features = mlb.fit_transform(all_genres)
+    
+    # 2. Ajouter la note normalisée (0-1)
+    notes = df_movies['note'].fillna(0).values / 10.0
+    notes = notes.reshape(-1, 1)
+    
+    # 3. Combiner les features
+    features = np.hstack([genre_features, notes])
+    
+    # Créer le modèle KNN
+    knn = NearestNeighbors(n_neighbors=min(50, len(df_movies)), metric='cosine')
+    knn.fit(features)
+    
+    # Trouver les indices des films aimés dans le DataFrame
+    liked_indices = []
     for film_id, _ in liked_films:
-        watched_ids.add(str(film_id))
+        matches = df_movies[df_movies['tconst'] == film_id]
+        if len(matches) > 0:
+            liked_indices.append(matches.index[0])
     
-    disliked_ids = set()
-    for film_id, _ in disliked_films:
-        watched_ids.add(str(film_id))
-        disliked_ids.add(str(film_id))
+    if len(liked_indices) == 0:
+        # Fallback sur méthode populaire
+        return get_personalized_recommendations(df_movies, [], disliked_films, top_n)
     
-    # Calculer le score pour chaque film
-    recommendations = []
+    # Pour chaque film aimé, trouver les voisins les plus proches
+    all_neighbors = set()
+    all_scores = {}
     
-    for idx, film in df_movies.iterrows():
-        film_id = str(film.get('tconst', ''))
+    for idx in liked_indices:
+        # Trouver les K voisins les plus proches
+        distances, indices = knn.kneighbors([features[idx]], n_neighbors=min(30, len(df_movies)))
         
-        # Exclure les films déjà vus
-        if film_id in watched_ids:
-            continue
-        
-        # Calculer le score de similarité
-        similarity_score = calculate_film_similarity_score(film, top_genres, disliked_ids)
-        
-        if similarity_score > 30:  # Seuil minimum
-            recommendations.append({
-                'film': film,
-                'score': similarity_score
-            })
+        for dist, neighbor_idx in zip(distances[0], indices[0]):
+            if neighbor_idx == idx:  # Skip le film lui-même
+                continue
+            
+            film_id = str(df_movies.iloc[neighbor_idx]['tconst'])
+            
+            # Exclure les films déjà vus
+            if film_id in watched_ids:
+                continue
+            
+            # Calculer le score (similarité cosine -> score 0-100)
+            # Distance cosine : 0 = identique, 2 = opposé
+            similarity = max(0, 1 - dist)  # Convertir distance en similarité
+            score = similarity * 100
+            
+            # Si le film apparaît plusieurs fois, prendre le meilleur score
+            if neighbor_idx not in all_scores or all_scores[neighbor_idx] < score:
+                all_scores[neighbor_idx] = score
+                all_neighbors.add(neighbor_idx)
     
-    # Trier par score
-    recommendations.sort(key=lambda x: x['score'], reverse=True)
+    # Convertir en liste et trier par score
+    recommendations = [(idx, all_scores[idx]) for idx in all_neighbors]
+    recommendations.sort(key=lambda x: x[1], reverse=True)
     
     # Prendre les top N
     top_recommendations = recommendations[:top_n]
     
-    # Convertir en DataFrame
     if len(top_recommendations) > 0:
-        films_data = [rec['film'] for rec in top_recommendations]
-        scores = [rec['score'] for rec in top_recommendations]
-        
-        result_df = pd.DataFrame(films_data)
-        result_df['score_recommandation'] = scores
+        # Créer le DataFrame de résultats
+        result_indices = [idx for idx, score in top_recommendations]
+        result_df = df_movies.iloc[result_indices].copy()
+        result_df['score_recommandation'] = [score for idx, score in top_recommendations]
         
         return result_df
     
     # Si aucune recommandation, retourner les populaires
     return get_personalized_recommendations(df_movies, [], disliked_films, top_n)
+
+
+# ==========================================
+# RECHERCHE PAR ACTEUR/RÉALISATEUR
+# ==========================================
+
+def find_movies_by_actor(query, df, max_results=20):
+    """
+    Recherche des films par nom d'acteur ou réalisateur
+    
+    Args:
+        query: Nom de l'acteur/réalisateur à chercher
+        df: DataFrame des films
+        max_results: Nombre maximum de résultats
+    
+    Returns:
+        tuple: (DataFrame résultats, message)
+    """
+    if not query or len(query) < 2:
+        return pd.DataFrame(), ""
+    
+    # Vérifier si les colonnes acteurs/réalisateurs existent
+    has_acteurs = 'acteurs' in df.columns
+    has_realisateurs = 'realisateurs' in df.columns
+    
+    if not has_acteurs and not has_realisateurs:
+        message = (
+            "⚠️ La recherche par acteur n'est pas disponible.\n\n"
+            "Les colonnes 'acteurs' et 'realisateurs' n'existent pas dans le dataset."
+        )
+        return pd.DataFrame(), message
+    
+    query_norm = normalize_text(query.lower())
+    results = []
+    
+    for idx, row in df.iterrows():
+        found = False
+        
+        # Chercher dans les acteurs si la colonne existe
+        if has_acteurs and not found:
+            acteurs = row.get('acteurs')
+            
+            # Gérer différents formats
+            if acteurs is not None:
+                # Si c'est un numpy array ou une liste (itérable)
+                if hasattr(acteurs, '__iter__') and not isinstance(acteurs, str):
+                    try:
+                        for acteur in acteurs:
+                            if acteur and isinstance(acteur, str) and acteur.strip():
+                                acteur_norm = normalize_text(acteur.lower())
+                                if query_norm in acteur_norm:
+                                    results.append(idx)
+                                    found = True
+                                    break
+                    except:
+                        pass
+                
+                # Si c'est une string (ex: "Brad Pitt, Edward Norton")
+                elif isinstance(acteurs, str) and acteurs.strip():
+                    acteurs_norm = normalize_text(acteurs.lower())
+                    if query_norm in acteurs_norm:
+                        results.append(idx)
+                        found = True
+        
+        # Chercher dans les réalisateurs si la colonne existe
+        if has_realisateurs and not found:
+            realisateurs = row.get('realisateurs')
+            
+            # Gérer différents formats
+            if realisateurs is not None:
+                # Si c'est un numpy array ou une liste (itérable)
+                if hasattr(realisateurs, '__iter__') and not isinstance(realisateurs, str):
+                    try:
+                        for real in realisateurs:
+                            if real and isinstance(real, str) and real.strip():
+                                real_norm = normalize_text(real.lower())
+                                if query_norm in real_norm:
+                                    results.append(idx)
+                                    found = True
+                                    break
+                    except:
+                        pass
+                
+                # Si c'est une string
+                elif isinstance(realisateurs, str) and realisateurs.strip():
+                    real_norm = normalize_text(realisateurs.lower())
+                    if query_norm in real_norm:
+                        results.append(idx)
+                        found = True
+    
+    if len(results) == 0:
+        return pd.DataFrame(), f"❌ Aucun film trouvé avec '{query}'"
+    
+    # Récupérer les films correspondants
+    matching_df = df.loc[results].copy()
+    
+    # Trier par note décroissante
+    if 'note' in matching_df.columns:
+        matching_df = matching_df.sort_values('note', ascending=False, na_position='last')
+    elif 'averageRating' in matching_df.columns:
+        matching_df = matching_df.sort_values('averageRating', ascending=False, na_position='last')
+    
+    # Limiter les résultats
+    matching_df = matching_df.head(max_results)
+    
+    message = f"✅ {len(matching_df)} film(s) trouvé(s) avec '{query}'"
+    
+    return matching_df, message
+
+
+def find_movies_combined(query, df, max_results=15, search_type='all', prefer_french=True):
+    """
+    Recherche combinée par titre ET/OU acteur
+    
+    Args:
+        query: Requête de recherche
+        df: DataFrame des films
+        max_results: Nombre maximum de résultats
+        search_type: 'title', 'actor', ou 'all'
+        prefer_french: Priorité aux titres français
+    
+    Returns:
+        tuple: (DataFrame résultats, message)
+    """
+    if not query or len(query) < 2:
+        return pd.DataFrame(), ""
+    
+    results_title = pd.DataFrame()
+    results_actor = pd.DataFrame()
+    message = ""
+    
+    # Recherche par titre
+    if search_type in ['title', 'all']:
+        results_title, _, msg_title = find_movies_with_correction(
+            query, df, max_results=max_results, prefer_french=prefer_french
+        )
+        if len(results_title) > 0:
+            message = msg_title
+    
+    # Recherche par acteur
+    if search_type in ['actor', 'all']:
+        results_actor, msg_actor = find_movies_by_actor(query, df, max_results=max_results)
+        if len(results_actor) > 0:
+            if message:
+                message += f" | {msg_actor}"
+            else:
+                message = msg_actor
+    
+    # Combiner les résultats
+    if search_type == 'title':
+        combined = results_title
+    elif search_type == 'actor':
+        combined = results_actor
+    else:  # 'all'
+        # Concaténer et supprimer les doublons
+        combined = pd.concat([results_title, results_actor]).drop_duplicates(subset=['tconst'])
+        combined = combined.head(max_results)
+    
+    if len(combined) == 0:
+        return pd.DataFrame(), f"❌ Aucun résultat pour '{query}'"
+    
+    return combined, message
+
+
+# ==========================================
+# GESTIONNAIRE DE PROFILS UTILISATEURS
+# ==========================================
+
+class UserManager:
+    """Gère les profils utilisateurs et leurs préférences de films"""
+    
+    def __init__(self, data_dir="data/user_profiles"):
+        """
+        Initialise le gestionnaire de profils
+        
+        Args:
+            data_dir: Répertoire où stocker les profils JSON
+        """
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+    
+    def _get_profile_path(self, username):
+        """Retourne le chemin du fichier de profil pour un utilisateur"""
+        return self.data_dir / f"{username}.json"
+    
+    def load_profile(self, username):
+        """
+        Charge le profil d'un utilisateur (ou crée un profil vide)
+        
+        Args:
+            username: Nom d'utilisateur
+        
+        Returns:
+            dict: Profil utilisateur
+        """
+        profile_path = self._get_profile_path(username)
+        
+        if profile_path.exists():
+            with open(profile_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        else:
+            # Créer un profil vide
+            return {
+                "username": username,
+                "films_vus": {},
+                "date_creation": datetime.now().isoformat()
+            }
+    
+    def save_profile(self, username, profile_data):
+        """
+        Sauvegarde le profil d'un utilisateur
+        
+        Args:
+            username: Nom d'utilisateur
+            profile_data: Données du profil
+        """
+        profile_path = self._get_profile_path(username)
+        
+        with open(profile_path, 'w', encoding='utf-8') as f:
+            json.dump(profile_data, f, indent=2, ensure_ascii=False)
+    
+    def add_film(self, username, film_data, rating):
+        """
+        Ajoute un film au profil de l'utilisateur
+        
+        Args:
+            username: Nom d'utilisateur
+            film_data: Dictionnaire avec les infos du film
+            rating: 'liked' ou 'disliked'
+        
+        Returns:
+            bool: True si succès
+        """
+        profile = self.load_profile(username)
+        
+        # Récupérer l'ID du film
+        film_id = film_data.get('tconst') or film_data.get('imdb_id') or film_data.get('id')
+        
+        if not film_id:
+            return False
+        
+        # Ajouter le film
+        profile['films_vus'][str(film_id)] = {
+            "titre": film_data.get('titre', 'Titre inconnu'),
+            "annee": film_data.get('startYear') or film_data.get('annee'),
+            "rating": rating,
+            "date_ajout": datetime.now().isoformat(),
+            "genres": film_data.get('genre', []),  # Liste de genres
+            "note": film_data.get('note'),
+            "votes": film_data.get('votes')
+        }
+        
+        self.save_profile(username, profile)
+        return True
+    
+    def update_film_rating(self, username, film_id, new_rating):
+        """
+        Modifie la note d'un film
+        
+        Args:
+            username: Nom d'utilisateur
+            film_id: ID du film
+            new_rating: 'liked' ou 'disliked'
+        
+        Returns:
+            bool: True si succès
+        """
+        profile = self.load_profile(username)
+        
+        if str(film_id) in profile['films_vus']:
+            profile['films_vus'][str(film_id)]['rating'] = new_rating
+            profile['films_vus'][str(film_id)]['date_modification'] = datetime.now().isoformat()
+            self.save_profile(username, profile)
+            return True
+        
+        return False
+    
+    def remove_film(self, username, film_id):
+        """
+        Supprime un film du profil
+        
+        Args:
+            username: Nom d'utilisateur
+            film_id: ID du film
+        
+        Returns:
+            bool: True si succès
+        """
+        profile = self.load_profile(username)
+        
+        if str(film_id) in profile['films_vus']:
+            del profile['films_vus'][str(film_id)]
+            self.save_profile(username, profile)
+            return True
+        
+        return False
+    
+    def get_liked_films(self, username):
+        """Récupère la liste des films aimés"""
+        profile = self.load_profile(username)
+        
+        liked = [
+            (film_id, film_data) 
+            for film_id, film_data in profile['films_vus'].items() 
+            if film_data.get('rating') == 'liked'
+        ]
+        
+        return liked
+    
+    def get_disliked_films(self, username):
+        """Récupère la liste des films pas aimés"""
+        profile = self.load_profile(username)
+        
+        disliked = [
+            (film_id, film_data) 
+            for film_id, film_data in profile['films_vus'].items() 
+            if film_data.get('rating') == 'disliked'
+        ]
+        
+        return disliked
+    
+    def get_statistics(self, username):
+        """
+        Calcule des statistiques sur les films vus
+        
+        Args:
+            username: Nom d'utilisateur
+        
+        Returns:
+            dict: Statistiques
+        """
+        profile = self.load_profile(username)
+        films_vus = profile['films_vus']
+        
+        nb_total = len(films_vus)
+        nb_liked = sum(1 for f in films_vus.values() if f.get('rating') == 'liked')
+        nb_disliked = sum(1 for f in films_vus.values() if f.get('rating') == 'disliked')
+        
+        # Genres préférés (des films aimés)
+        genres_count = {}
+        for film in films_vus.values():
+            if film.get('rating') == 'liked' and film.get('genres'):
+                genres = film['genres']
+                
+                # Gérer les deux formats : liste ou string
+                if isinstance(genres, list):
+                    genre_list = genres
+                elif isinstance(genres, str):
+                    genre_list = [g.strip() for g in genres.split(',') if g.strip()]
+                else:
+                    genre_list = []
+                
+                # Compter chaque genre
+                for genre in genre_list:
+                    if genre:
+                        genres_count[genre] = genres_count.get(genre, 0) + 1
+        
+        genres_preferes = sorted(genres_count.items(), key=lambda x: x[1], reverse=True)[:5]
+        
+        return {
+            "nb_total": nb_total,
+            "nb_liked": nb_liked,
+            "nb_disliked": nb_disliked,
+            "pourcentage_liked": (nb_liked / nb_total * 100) if nb_total > 0 else 0,
+            "genres_preferes": genres_preferes
+        }
+    
+    def is_film_already_rated(self, username, film_id):
+        """Vérifie si un film a déjà été noté"""
+        profile = self.load_profile(username)
+        
+        if str(film_id) in profile['films_vus']:
+            return profile['films_vus'][str(film_id)].get('rating')
+        
+        return None
+    
+    def get_all_films(self, username):
+        """Récupère tous les films vus"""
+        profile = self.load_profile(username)
+        return profile['films_vus']
+
+
+# ==========================================
+# CACHE PROFIL PAUL
+# ==========================================
+
+PAUL_LIKED_FILMS = {
+    # Films de Guerre (9)
+    "tt0056119": {"titre": "Le Jour le plus long", "annee": 1962, "rating": "liked", "genres": ["War", "Drama", "History"], "note": 7.7, "votes": 58000},
+    "tt0301383": {"titre": "La Chute du faucon noir", "annee": 2001, "rating": "liked", "genres": ["War", "Drama", "Action"], "note": 7.7, "votes": 398000},
+    "tt1655246": {"titre": "Démineur", "annee": 2008, "rating": "liked", "genres": ["War", "Drama", "Thriller"], "note": 7.5, "votes": 453000},
+    "tt0076789": {"titre": "La 7ème compagnie", "annee": 1973, "rating": "liked", "genres": ["War", "Comedy"], "note": 6.9, "votes": 4000},
+    "tt0120815": {"titre": "Il faut sauver le soldat Ryan", "annee": 1998, "rating": "liked", "genres": ["War", "Drama"], "note": 8.6, "votes": 1400000},
+    "tt0062653": {"titre": "La Grande Vadrouille", "annee": 1966, "rating": "liked", "genres": ["War", "Comedy", "Adventure"], "note": 7.9, "votes": 18000},
+    "tt0338564": {"titre": "Troie", "annee": 2004, "rating": "liked", "genres": ["War", "Adventure", "Drama"], "note": 7.3, "votes": 541000},
+    "tt0408306": {"titre": "Apocalypto", "annee": 2006, "rating": "liked", "genres": ["Action", "Adventure", "Drama"], "note": 7.8, "votes": 319000},
+    "tt0093058": {"titre": "Full Metal Jacket", "annee": 1987, "rating": "liked", "genres": ["War", "Drama"], "note": 8.3, "votes": 768000},
+    
+    # Films d'Animation (8)
+    "tt0441773": {"titre": "Kung Fu Panda", "annee": 2008, "rating": "liked", "genres": ["Animation", "Action", "Adventure"], "note": 7.6, "votes": 490000},
+    "tt0892769": {"titre": "Dragons", "annee": 2010, "rating": "liked", "genres": ["Animation", "Action", "Adventure"], "note": 8.1, "votes": 756000},
+    "tt1431045": {"titre": "Dragons 2", "annee": 2014, "rating": "liked", "genres": ["Animation", "Action", "Adventure"], "note": 7.8, "votes": 343000},
+    "tt2386490": {"titre": "Dragons 3", "annee": 2019, "rating": "liked", "genres": ["Animation", "Action", "Adventure"], "note": 7.4, "votes": 135000},
+    "tt1049413": {"titre": "Kung Fu Panda 2", "annee": 2011, "rating": "liked", "genres": ["Animation", "Action", "Adventure"], "note": 7.3, "votes": 295000},
+    "tt2267968": {"titre": "Kung Fu Panda 3", "annee": 2016, "rating": "liked", "genres": ["Animation", "Action", "Adventure"], "note": 7.1, "votes": 165000},
+    "tt0401792": {"titre": "Là-haut", "annee": 2009, "rating": "liked", "genres": ["Animation", "Adventure", "Comedy"], "note": 8.3, "votes": 1100000},
+    "tt1217209": {"titre": "Raiponce", "annee": 2010, "rating": "liked", "genres": ["Animation", "Adventure", "Comedy"], "note": 7.7, "votes": 456000},
+    
+    # Films Historiques/Biographiques (13)
+    "tt0382932": {"titre": "Écrire pour exister", "annee": 2007, "rating": "liked", "genres": ["Biography", "Drama"], "note": 7.6, "votes": 92000},
+    "tt2980516": {"titre": "L'incroyable histoire du temps", "annee": 2014, "rating": "liked", "genres": ["Biography", "Drama", "Romance"], "note": 7.7, "votes": 479000},
+    "tt1205489": {"titre": "Le Discours d'un roi", "annee": 2010, "rating": "liked", "genres": ["Biography", "Drama", "History"], "note": 8.0, "votes": 706000},
+    "tt0268978": {"titre": "Un homme d'exception", "annee": 2001, "rating": "liked", "genres": ["Biography", "Drama"], "note": 8.2, "votes": 975000},
+    "tt1745960": {"titre": "Imitation Game", "annee": 2014, "rating": "liked", "genres": ["Biography", "Drama", "Thriller"], "note": 8.0, "votes": 788000},
+    "tt0443272": {"titre": "Lincoln", "annee": 2012, "rating": "liked", "genres": ["Biography", "Drama", "History"], "note": 7.3, "votes": 279000},
+    "tt0112573": {"titre": "Braveheart", "annee": 1995, "rating": "liked", "genres": ["Biography", "Drama", "History"], "note": 8.3, "votes": 1050000},
+    "tt0172495": {"titre": "Gladiator", "annee": 2000, "rating": "liked", "genres": ["Action", "Adventure", "Drama"], "note": 8.5, "votes": 1600000},
+    "tt0245429": {"titre": "USS Indianapolis", "annee": 2016, "rating": "liked", "genres": ["War", "Drama", "History"], "note": 5.3, "votes": 7000},
+    "tt1028528": {"titre": "Walkyrie", "annee": 2008, "rating": "liked", "genres": ["Drama", "History", "Thriller"], "note": 7.1, "votes": 267000},
+    "tt0367279": {"titre": "La Chute", "annee": 2004, "rating": "liked", "genres": ["Biography", "Drama", "History"], "note": 8.2, "votes": 367000},
+}
+
+
+def init_paul_profile_if_needed(user_manager, force=False):
+    """
+    Initialise automatiquement le profil de Paul s'il est vide
+    
+    Args:
+        user_manager: Instance de UserManager
+        force: Si True, réinitialise même si le profil existe
+    
+    Returns:
+        bool: True si le profil a été initialisé
+    """
+    from datetime import datetime
+    
+    profile = user_manager.load_profile("paul")
+    
+    # Vérifier si le profil est vide
+    if force or len(profile.get('films_vus', {})) == 0:
+        films_vus = {}
+        for tconst, film_data in PAUL_LIKED_FILMS.items():
+            films_vus[tconst] = {
+                "titre": film_data['titre'],
+                "annee": film_data['annee'],
+                "rating": film_data['rating'],
+                "date_ajout": datetime.now().isoformat(),
+                "genres": film_data['genres'],
+                "note": film_data.get('note'),
+                "votes": film_data.get('votes')
+            }
+        
+        profile['films_vus'] = films_vus
+        user_manager.save_profile("paul", profile)
+        
+        return True
+    
+    return False
 

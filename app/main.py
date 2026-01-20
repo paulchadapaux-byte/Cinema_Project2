@@ -22,11 +22,9 @@ from utils import (
     assign_films_to_cinemas, calculate_cinema_distance,
     get_movie_details_from_tmdb, get_films_affiche_enrichis,
     assign_films_to_cinemas_enrichis, find_movies_with_correction,
-    display_youtube_video, get_trailers_from_films, check_title_columns
+    display_youtube_video, get_trailers_from_films, check_title_columns,
+    UserManager, init_paul_profile_if_needed
 )
-
-# Import du gestionnaire de profils
-from user_manager import UserManager
 
 # ==========================================
 # CONFIGURATION
@@ -34,6 +32,9 @@ from user_manager import UserManager
 
 # Initialiser le gestionnaire de profils
 user_manager = UserManager()
+
+# Initialiser le profil Paul si vide (cache de 30 films)
+init_paul_profile_if_needed(user_manager)
 
 st.set_page_config(
     page_title="Votre cinéma en Creuse",
@@ -115,14 +116,6 @@ def load_imdb_data():
             if old_col in df.columns and new_col not in df.columns:
                 df[new_col] = df[old_col]
         
-        # Vérifier la présence de la colonne frenchTitle
-        has_french = 'frenchTitle' in df.columns
-        
-        if has_french:
-            french_count = df['frenchTitle'].notna().sum()
-            st.sidebar.success(f"🇫🇷 {french_count:,} titres français disponibles")
-        else:
-            st.sidebar.warning("⚠️ Titres français non disponibles")
         
         # ==========================================
         # CONVERSIONS ET NETTOYAGE
@@ -276,7 +269,7 @@ st.sidebar.title("🎬 Navigation")
 
 page = st.sidebar.radio(
     "Choisir une page",
-    ["🏠 Accueil", "🎬 Films à l'affiche", "💡 Recommandations", "👤 Mon Profil", "🗺️ Cinémas Creuse", "🎭 Activités Annexes", "📊 Espace B2B"]
+    ["🏠 Accueil", "🎬 Films à l'affiche", "❤️ Mes Films Favoris", "💡 Recommandations", "🗺️ Cinémas Creuse", "🎭 Activités Annexes", "📊 Espace B2B"]
 )
 
 st.sidebar.markdown("---")
@@ -655,6 +648,7 @@ if page == "🏠 Accueil":
     """)
 
 elif page == "🎬 Films à l'affiche":
+    st.info("Les informations de cette page (visuels et informations) sont chargées grâce à l'API IMDB. \n\n La requête se fait sur les films actuellement proposés en salle en France.", icon="ℹ️")
     st.title("🎬 Films à l'affiche en France")
     st.markdown("Découvrez tous les films en salles maintenant et ceux qui arrivent bientôt !") 
     
@@ -674,8 +668,6 @@ elif page == "🎬 Films à l'affiche":
     if trailers_disponibles:
         st.markdown("### 🎥 Bande-annonce du moment")
         
-        # Sélectionner un trailer (le premier avec la meilleure popularité)
-        # On pourrait aussi faire random.choice(list(trailers_disponibles.values()))
         films_avec_trailers = [
             (key, info) for key, info in trailers_disponibles.items()
         ]
@@ -713,7 +705,7 @@ elif page == "🎬 Films à l'affiche":
         st.markdown("---")
     
     # Séparer les films par statut
-    from films_cache import separer_films_par_statut
+    from utils import separer_films_par_statut
     films_en_salles, films_bientot = separer_films_par_statut(films_affiche)
     
     st.success(f"✅ {len(films_en_salles)} films en salles • 🔜 {len(films_bientot)} films à venir")
@@ -995,7 +987,7 @@ elif page == "💡 Recommandations":
             st.info("💡 **Aucun film aimé dans votre profil**")
             st.markdown("""
             Pour recevoir des recommandations personnalisées :
-            1. Allez sur la page **👤 Mon Profil**
+            1. Allez sur la page **❤️ Mes Films Favoris**
             2. Recherchez des films que vous avez aimés
             3. Cliquez sur 👍 pour les ajouter
             4. Revenez ici pour voir vos recommandations !
@@ -1036,24 +1028,40 @@ elif page == "💡 Recommandations":
                 if len(films_filtered) == 0:
                     st.warning(f"Aucun film avec un score >= {min_score}%. Réduisez le score minimum.")
                 else:
-                    # Afficher les recommandations
+                    # Afficher les recommandations avec affiches
                     for idx, film in films_filtered.head(nb_to_show).iterrows():
-                        col1, col2 = st.columns([4, 1])
                         
-                        with col1:
-                            titre = film['titre']
-                            annee = film.get('startYear', '?')
-                            note = film.get('note', 0)
-                            genres = film.get('genres', '')
+                        # Enrichir le film avec TMDb pour l'affiche
+                        from utils import enrich_movie_with_tmdb, get_display_title
+                        film_enrichi = enrich_movie_with_tmdb(film)
+                        
+                        col_poster, col_info, col_actions = st.columns([1, 3, 1])
+                        
+                        with col_poster:
+                            # Afficher l'affiche
+                            st.image(film_enrichi['poster_url'], use_container_width=True)
+                        
+                        with col_info:
+                            # Titre français prioritaire
+                            titre_display = get_display_title(film, prefer_french=True, include_year=True)
+                            note = film.get('note', film.get('averageRating', 0))
+                            
+                            # Genres
+                            genres = film.get('genre', [])
+                            if isinstance(genres, list) and len(genres) > 0:
+                                genres_str = ', '.join(genres[:3])
+                            else:
+                                genres_str = str(film.get('genres', ''))
+                            
                             score_reco = film.get('score_recommandation', 0)
                             
-                            st.markdown(f"**{titre}** ({annee})")
-                            st.markdown(f"⭐ {note:.1f}/10 | {genres}")
+                            st.markdown(f"**{titre_display}**")
+                            st.markdown(f"⭐ {note:.1f}/10 | 🎭 {genres_str}")
                             
                             # Barre de progression du score de recommandation
                             st.progress(score_reco / 100, text=f"Correspondance : {score_reco:.0f}%")
                         
-                        with col2:
+                        with col_actions:
                             # Vérifier si déjà vu
                             film_id = film.get('tconst')
                             already_rated = user_manager.is_film_already_rated(current_user, film_id)
@@ -1065,17 +1073,15 @@ elif page == "💡 Recommandations":
                                     st.error("❌ Pas aimé")
                             else:
                                 # Boutons pour ajouter
-                                col_like, col_dislike = st.columns(2)
-                                with col_like:
-                                    if st.button("👍", key=f"tab1_reco_like_{film_id}"):
-                                        user_manager.add_film(current_user, film, 'liked')
-                                        st.success("Ajouté !")
-                                        st.rerun()
-                                with col_dislike:
-                                    if st.button("👎", key=f"tab1_reco_dislike_{film_id}"):
-                                        user_manager.add_film(current_user, film, 'disliked')
-                                        st.info("Noté")
-                                        st.rerun()
+                                if st.button("👍", key=f"tab1_reco_like_{film_id}", use_container_width=True):
+                                    user_manager.add_film(current_user, film, 'liked')
+                                    st.success("Ajouté !")
+                                    st.rerun()
+                                
+                                if st.button("👎", key=f"tab1_reco_dislike_{film_id}", use_container_width=True):
+                                    user_manager.add_film(current_user, film, 'disliked')
+                                    st.info("Noté")
+                                    st.rerun()
                         
                         st.markdown("---")
             else:
@@ -1087,22 +1093,53 @@ elif page == "💡 Recommandations":
     
     with tab2:
         st.markdown("### 🔍 Trouvez des films similaires")
-        st.markdown("*Cherchez par titre de film et obtenez des recommandations*")
+        st.markdown("*Cherchez par titre de film ou par nom d'acteur/réalisateur*")
         
-        # Barre de recherche
-        col1, col2, col3 = st.columns([3, 1, 1])
+        # Options de recherche
+        col_type, col_search = st.columns([1, 4])
         
-        with col1:
+        with col_type:
+            search_type = st.selectbox(
+                "Type",
+                options=['Titre', 'Acteur', 'Tout'],
+                help="Chercher par titre de film ou nom d'acteur/réalisateur",
+                key="search_type_tab2"
+            )
+        
+        with col_search:
+            placeholders = {
+                'Titre': "Ex: Les Évadés, Inception...",
+                'Acteur': "Ex: Brad Pitt, Marion Cotillard...",
+                'Tout': "Ex: Inception, Christopher Nolan..."
+            }
+            
             search_query = st.text_input(
-                "Entrez le nom d'un film que vous aimez",
-                placeholder="Ex: Les Évadés, Inception, Le Seigneur des Anneaux...",
+                "Recherche",
+                placeholder=placeholders[search_type],
                 label_visibility="collapsed",
                 help="Vous pouvez chercher en français ou en anglais !",
                 key="search_tab2"
             )
         
+        # Options avancées
+        col1, col2, col3 = st.columns([2, 2, 1])
+        
+        with col1:
+            prefer_french = st.checkbox(
+                "🇫🇷 Priorité français", 
+                value=True, 
+                help="Prioriser les titres français",
+                key="prefer_french_tab2",
+                disabled=(search_type == 'Acteur')
+            )
+        
         with col2:
-            prefer_french = st.checkbox("🇫🇷 Priorité français", value=True, help="Prioriser les résultats avec titre français", key="prefer_french_tab2")
+            show_poster = st.checkbox(
+                "🖼️ Afficher affiches", 
+                value=True,
+                help="Afficher les affiches de films",
+                key="show_poster_tab2"
+            )
         
         with col3:
             search_button = st.button("🔍 Rechercher", use_container_width=True, key="search_btn_tab2")
@@ -1110,56 +1147,124 @@ elif page == "💡 Recommandations":
         # Résultats de recherche
         if search_query or search_button:
             
-            # Utiliser la fonction de correction orthographique optimisée
-            matching_movies, correction, correction_message = find_movies_with_correction(
+            # Convertir type de recherche
+            search_type_param = {
+                'Titre': 'title',
+                'Acteur': 'actor',
+                'Tout': 'all'
+            }[search_type]
+            
+            # Recherche combinée
+            from utils import find_movies_combined
+            matching_movies, search_message = find_movies_combined(
                 search_query, 
                 df_movies, 
-                max_results=10,
+                max_results=15,
+                search_type=search_type_param,
                 prefer_french=prefer_french
             )
             
-            # Afficher le message de correction si présent
-            if correction_message:
-                st.info(correction_message)
+            # Afficher le message
+            if search_message:
+                # Si le message contient "colonnes" ou "dataset", c'est une erreur de configuration
+                if "colonnes" in search_message.lower() or "dataset" in search_message.lower():
+                    st.error(search_message)
+                else:
+                    st.info(search_message)
             
             if len(matching_movies) == 0:
-                st.warning(f"❌ Aucun film trouvé pour '{search_query}'")
-                st.info("💡 Essayez avec un autre titre, en français ou en anglais, ou une partie du titre")
+                st.warning(f"❌ Aucun résultat pour '{search_query}'")
+                
+                # Message d'aide différent selon le type de recherche
+                if search_type_param == 'actor':
+                    st.info(
+                        "💡 **Conseils pour la recherche par acteur :**\n\n"
+                        "• Essayez avec seulement le **nom de famille** (ex: 'Pitt' au lieu de 'Brad Pitt')\n"
+                        "• Essayez des variations : 'DiCaprio' ou 'Di Caprio'\n"
+                        "• Vérifiez l'orthographe\n"
+                        "• Certains acteurs peuvent ne pas avoir de films dans le dataset filtré"
+                    )
+                else:
+                    st.info("💡 Essayez en français ou en anglais")
             
             else:
-                st.success(f"✅ {len(matching_movies)} film(s) trouvé(s)")
+                st.success(f"✅ {len(matching_movies)} résultat(s)")
                 
                 st.markdown("---")
                 st.subheader("📋 Résultats de recherche")
                 
                 for idx, (_, movie) in enumerate(matching_movies.iterrows()):
-                    col1, col2 = st.columns([1, 4])
                     
-                    with col1:
-                        st.markdown(f"**{idx+1}.**")
+                    if show_poster:
+                        # Avec affiche
+                        col_poster, col_info, col_action = st.columns([1, 3, 1])
+                        
+                        with col_poster:
+                            # Enrichir pour l'affiche
+                            from utils import enrich_movie_with_tmdb
+                            film_enrichi = enrich_movie_with_tmdb(movie)
+                            st.image(film_enrichi['poster_url'], use_container_width=True)
+                        
+                        with col_info:
+                            # Affichage bilingue
+                            from utils import format_movie_display
+                            display_title = format_movie_display(movie, show_both_titles=True)
+                            rating = movie.get('note', movie.get('averageRating', 0))
+                            votes = movie.get('votes', movie.get('numVotes', 0))
+                            
+                            st.markdown(f"**{display_title}**")
+                            st.markdown(f"⭐ {rating:.1f}/10")
+                            
+                            if votes > 0:
+                                st.caption(f"🗳️ {votes:,} votes")
+                            
+                            # Genres
+                            if 'genre' in movie.index and isinstance(movie['genre'], list) and len(movie['genre']) > 0:
+                                genres_str = " · ".join(movie['genre'][:3])
+                                st.caption(f"🎭 {genres_str}")
+                            
+                            # Acteurs si recherche acteur
+                            if search_type_param in ['actor', 'all']:
+                                if 'acteurs' in movie.index and isinstance(movie.get('acteurs'), list) and len(movie['acteurs']) > 0:
+                                    actors_str = ", ".join(movie['acteurs'][:3])
+                                    st.caption(f"👥 {actors_str}")
+                        
+                        with col_action:
+                            if st.button(f"🎬 Voir similaires", key=f"tab2_reco_{idx}", use_container_width=True):
+                                st.session_state.selected_movie_index = movie.name
+                                st.session_state.selected_movie_title = display_title
+                                st.rerun()
                     
-                    with col2:
-                        # Utiliser la fonction d'affichage optimisée
-                        from utils import format_movie_display, get_both_titles
+                    else:
+                        # Sans affiche (compact)
+                        col1, col2 = st.columns([1, 4])
                         
-                        display_title = format_movie_display(movie, show_both_titles=True)
-                        rating = movie.get('note', 0)
-                        votes = movie.get('votes', 0)
+                        with col1:
+                            st.markdown(f"**{idx+1}.**")
                         
-                        st.markdown(f"**{display_title}** - ⭐ {rating:.1f}/10")
-                        
-                        if votes > 0:
-                            st.caption(f"🗳️ {votes:,} votes")
-                        
-                        # Afficher les genres si disponibles
-                        if 'genre' in movie.index and isinstance(movie['genre'], list) and len(movie['genre']) > 0:
-                            genres_str = " · ".join(movie['genre'][:3])
-                            st.caption(f"🎭 {genres_str}")
-                        
-                        if st.button(f"🎬 Voir les recommandations", key=f"tab2_reco_{idx}"):
-                            st.session_state.selected_movie_index = movie.name
-                            st.session_state.selected_movie_title = display_title
-                            st.rerun()
+                        with col2:
+                            # Affichage bilingue
+                            from utils import format_movie_display
+                            display_title = format_movie_display(movie, show_both_titles=True)
+                            rating = movie.get('note', movie.get('averageRating', 0))
+                            votes = movie.get('votes', movie.get('numVotes', 0))
+                            
+                            st.markdown(f"**{display_title}** - ⭐ {rating:.1f}/10")
+                            
+                            if votes > 0:
+                                st.caption(f"🗳️ {votes:,} votes")
+                            
+                            # Genres
+                            if 'genre' in movie.index and isinstance(movie['genre'], list) and len(movie['genre']) > 0:
+                                genres_str = " · ".join(movie['genre'][:3])
+                                st.caption(f"🎭 {genres_str}")
+                            
+                            if st.button(f"🎬 Voir les recommandations", key=f"tab2_reco_{idx}"):
+                                st.session_state.selected_movie_index = movie.name
+                                st.session_state.selected_movie_title = display_title
+                                st.rerun()
+                    
+                    st.markdown("---")
         
         # Affichage des recommandations
         if 'selected_movie_index' in st.session_state:
@@ -1170,54 +1275,70 @@ elif page == "💡 Recommandations":
             st.markdown("---")
             st.subheader(f"💡 Films similaires à : **{selected_title}**")
             
-            with st.spinner("🔄 Génération des recommandations..."):
-                reco_df, method = get_recommendations(df_movies, selected_idx, n=8)
-            
-            st.caption(f"Méthode : {method}")
-            
-            if len(reco_df) == 0:
-                st.warning("Aucune recommandation trouvée")
-            
-            else:
-                # Enrichir avec API TMDb
-                enriched_movies = []
+            # Trouver le film dans df_movies par index
+            # selected_idx peut être l'index de la recherche, il faut le bon index dans df_movies
+            try:
+                # Récupérer le film à partir de l'index de recherche
+                if selected_idx in df_movies.index:
+                    movie_to_recommend = df_movies.loc[selected_idx]
+                else:
+                    # Si l'index n'existe pas, chercher par tconst si disponible
+                    st.error("Film non trouvé dans la base de données")
+                    st.stop()
                 
-                progress_bar = st.progress(0)
-                status_text = st.empty()
+                with st.spinner("🔄 Génération des recommandations..."):
+                    reco_df, method = get_recommendations(df_movies, selected_idx, n=8)
                 
-                for i, (_, movie) in enumerate(reco_df.iterrows()):
-                    status_text.text(f"Chargement {i+1}/{len(reco_df)} : {movie['titre']}")
-                    progress_bar.progress((i+1) / len(reco_df))
+                st.caption(f"Méthode : {method}")
+                
+                if len(reco_df) == 0:
+                    st.warning("Aucune recommandation trouvée pour ce film")
+                
+                else:
+                    # Enrichir avec API TMDb
+                    enriched_movies = []
                     
-                    enriched = enrich_movie_with_tmdb(movie)
-                    enriched_movies.append(enriched)
-                
-                progress_bar.empty()
-                status_text.empty()
-                
-                # Afficher les films enrichis
-                cols = st.columns(4)
-                
-                for i, film in enumerate(enriched_movies):
-                    with cols[i % 4]:
-                        st.image(film['poster_url'], use_container_width=True)
-                        st.markdown(f"**{film['title'][:30]}{'...' if len(film['title']) > 30 else ''}**")
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    for i, (_, movie) in enumerate(reco_df.iterrows()):
+                        status_text.text(f"Chargement {i+1}/{len(reco_df)}...")
+                        progress_bar.progress((i+1) / len(reco_df))
                         
-                        if film['rating']:
-                            st.markdown(f"⭐ {film['rating']:.1f}/10")
-                        
-                        if film['year']:
-                            st.caption(f"📅 {film['year']}")
-                        
-                        if film['director'] != 'Inconnu':
-                            st.caption(f"🎬 {film['director'][:20]}")
-                        
-                        if film['genres']:
-                            genres_str = ', '.join(film['genres'][:2])
-                            st.caption(f"🎭 {genres_str}")
-                        
-                        if st.button("📄 Détails", key=f"tab2_details_{i}"):
-                            st.session_state.show_detail_index = i
+                        enriched = enrich_movie_with_tmdb(movie)
+                        enriched_movies.append(enriched)
+                    
+                    progress_bar.empty()
+                    status_text.empty()
+                    
+                    # Afficher les films enrichis
+                    cols = st.columns(4)
+                    
+                    for i, film in enumerate(enriched_movies):
+                        with cols[i % 4]:
+                            st.image(film['poster_url'], use_container_width=True)
+                            st.markdown(f"**{film['title'][:30]}{'...' if len(film['title']) > 30 else ''}**")
+                            
+                            if film['rating']:
+                                st.markdown(f"⭐ {film['rating']:.1f}/10")
+                            
+                            if film['year']:
+                                st.caption(f"📅 {film['year']}")
+                            
+                            if film['director'] != 'Inconnu':
+                                st.caption(f"🎬 {film['director'][:20]}")
+                            
+                            if film['genres']:
+                                genres_str = ', '.join(film['genres'][:2])
+                                st.caption(f"🎭 {genres_str}")
+                            
+                            if st.button("📄 Détails", key=f"tab2_details_{i}"):
+                                st.session_state.show_detail_index = i
+            
+            except Exception as e:
+                st.error(f"Erreur lors de la génération des recommandations : {e}")
+                import traceback
+                st.code(traceback.format_exc())
                 
                 # Détails du film sélectionné
                 if 'show_detail_index' in st.session_state:
@@ -1261,8 +1382,8 @@ elif page == "💡 Recommandations":
                         st.rerun()
 
 
-elif page == "👤 Mon Profil":
-    st.title("👤 Mon Profil")
+elif page == "❤️ Mes Films Favoris":
+    st.title("❤️ Mes Films Favoris")
     
     # Vérifier si l'utilisateur est connecté
     if not st.session_state.get('authenticated', False):
@@ -1335,6 +1456,10 @@ elif page == "👤 Mon Profil":
                 max_results=10,
                 prefer_french=prefer_french_profile
             )
+            
+            # Trier les résultats par année décroissante (plus récent d'abord)
+            if len(results) > 0 and 'startYear' in results.columns:
+                results = results.sort_values('startYear', ascending=False, na_position='last')
             
             if message:
                 st.info(message)

@@ -1,32 +1,377 @@
 {
   "username": "paul",
   "films_vus": {
-    "tt0463998": {
-      "titre": "Freedom Writers",
-      "annee": 2007,
+    "tt0056119": {
+      "titre": "Le Jour le plus long",
+      "annee": 1962,
       "rating": "liked",
-      "date_ajout": "2026-01-19T16:37:11.566236",
-      "genres": "Biography,Crime,Drama",
-      "note": 7.6,
-      "votes": 91993.0
+      "date_ajout": "2026-01-20T16:26:21.335824",
+      "genres": [
+        "War",
+        "Drama",
+        "History"
+      ],
+      "note": 7.7,
+      "votes": 58000
     },
-    "tt1302011": {
-      "titre": "Kung Fu Panda 2",
-      "annee": 2011,
+    "tt0301383": {
+      "titre": "La Chute du faucon noir",
+      "annee": 2001,
       "rating": "liked",
-      "date_ajout": "2026-01-19T22:53:38.715888",
-      "genres": "Action,Adventure,Animation",
+      "date_ajout": "2026-01-20T16:26:21.335845",
+      "genres": [
+        "War",
+        "Drama",
+        "Action"
+      ],
+      "note": 7.7,
+      "votes": 398000
+    },
+    "tt1655246": {
+      "titre": "Démineur",
+      "annee": 2008,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335852",
+      "genres": [
+        "War",
+        "Drama",
+        "Thriller"
+      ],
+      "note": 7.5,
+      "votes": 453000
+    },
+    "tt0076789": {
+      "titre": "La 7ème compagnie",
+      "annee": 1973,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335857",
+      "genres": [
+        "War",
+        "Comedy"
+      ],
+      "note": 6.9,
+      "votes": 4000
+    },
+    "tt0120815": {
+      "titre": "Il faut sauver le soldat Ryan",
+      "annee": 1998,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335861",
+      "genres": [
+        "War",
+        "Drama"
+      ],
+      "note": 8.6,
+      "votes": 1400000
+    },
+    "tt0062653": {
+      "titre": "La Grande Vadrouille",
+      "annee": 1966,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335866",
+      "genres": [
+        "War",
+        "Comedy",
+        "Adventure"
+      ],
+      "note": 7.9,
+      "votes": 18000
+    },
+    "tt0338564": {
+      "titre": "Troie",
+      "annee": 2004,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335871",
+      "genres": [
+        "War",
+        "Adventure",
+        "Drama"
+      ],
       "note": 7.3,
-      "votes": 351017.0
+      "votes": 541000
+    },
+    "tt0408306": {
+      "titre": "Apocalypto",
+      "annee": 2006,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335875",
+      "genres": [
+        "Action",
+        "Adventure",
+        "Drama"
+      ],
+      "note": 7.8,
+      "votes": 319000
+    },
+    "tt0093058": {
+      "titre": "Full Metal Jacket",
+      "annee": 1987,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335879",
+      "genres": [
+        "War",
+        "Drama"
+      ],
+      "note": 8.3,
+      "votes": 768000
     },
     "tt0441773": {
       "titre": "Kung Fu Panda",
       "annee": 2008,
       "rating": "liked",
-      "date_ajout": "2026-01-19T22:54:26.684402",
-      "genres": "Action,Adventure,Animation",
+      "date_ajout": "2026-01-20T16:26:21.335884",
+      "genres": [
+        "Animation",
+        "Action",
+        "Adventure"
+      ],
       "note": 7.6,
-      "votes": 570064.0
+      "votes": 490000
+    },
+    "tt0892769": {
+      "titre": "Dragons",
+      "annee": 2010,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335888",
+      "genres": [
+        "Animation",
+        "Action",
+        "Adventure"
+      ],
+      "note": 8.1,
+      "votes": 756000
+    },
+    "tt1431045": {
+      "titre": "Dragons 2",
+      "annee": 2014,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335893",
+      "genres": [
+        "Animation",
+        "Action",
+        "Adventure"
+      ],
+      "note": 7.8,
+      "votes": 343000
+    },
+    "tt2386490": {
+      "titre": "Dragons 3",
+      "annee": 2019,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335896",
+      "genres": [
+        "Animation",
+        "Action",
+        "Adventure"
+      ],
+      "note": 7.4,
+      "votes": 135000
+    },
+    "tt1049413": {
+      "titre": "Kung Fu Panda 2",
+      "annee": 2011,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335900",
+      "genres": [
+        "Animation",
+        "Action",
+        "Adventure"
+      ],
+      "note": 7.3,
+      "votes": 295000
+    },
+    "tt2267968": {
+      "titre": "Kung Fu Panda 3",
+      "annee": 2016,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335903",
+      "genres": [
+        "Animation",
+        "Action",
+        "Adventure"
+      ],
+      "note": 7.1,
+      "votes": 165000
+    },
+    "tt0401792": {
+      "titre": "Là-haut",
+      "annee": 2009,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335907",
+      "genres": [
+        "Animation",
+        "Adventure",
+        "Comedy"
+      ],
+      "note": 8.3,
+      "votes": 1100000
+    },
+    "tt1217209": {
+      "titre": "Raiponce",
+      "annee": 2010,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335911",
+      "genres": [
+        "Animation",
+        "Adventure",
+        "Comedy"
+      ],
+      "note": 7.7,
+      "votes": 456000
+    },
+    "tt0382932": {
+      "titre": "Écrire pour exister",
+      "annee": 2007,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335914",
+      "genres": [
+        "Biography",
+        "Drama"
+      ],
+      "note": 7.6,
+      "votes": 92000
+    },
+    "tt2980516": {
+      "titre": "L'incroyable histoire du temps",
+      "annee": 2014,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335917",
+      "genres": [
+        "Biography",
+        "Drama",
+        "Romance"
+      ],
+      "note": 7.7,
+      "votes": 479000
+    },
+    "tt1205489": {
+      "titre": "Le Discours d'un roi",
+      "annee": 2010,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335921",
+      "genres": [
+        "Biography",
+        "Drama",
+        "History"
+      ],
+      "note": 8.0,
+      "votes": 706000
+    },
+    "tt0268978": {
+      "titre": "Un homme d'exception",
+      "annee": 2001,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335924",
+      "genres": [
+        "Biography",
+        "Drama"
+      ],
+      "note": 8.2,
+      "votes": 975000
+    },
+    "tt1745960": {
+      "titre": "Imitation Game",
+      "annee": 2014,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335927",
+      "genres": [
+        "Biography",
+        "Drama",
+        "Thriller"
+      ],
+      "note": 8.0,
+      "votes": 788000
+    },
+    "tt0443272": {
+      "titre": "Lincoln",
+      "annee": 2012,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335933",
+      "genres": [
+        "Biography",
+        "Drama",
+        "History"
+      ],
+      "note": 7.3,
+      "votes": 279000
+    },
+    "tt0112573": {
+      "titre": "Braveheart",
+      "annee": 1995,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335937",
+      "genres": [
+        "Biography",
+        "Drama",
+        "History"
+      ],
+      "note": 8.3,
+      "votes": 1050000
+    },
+    "tt0172495": {
+      "titre": "Gladiator",
+      "annee": 2000,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335940",
+      "genres": [
+        "Action",
+        "Adventure",
+        "Drama"
+      ],
+      "note": 8.5,
+      "votes": 1600000
+    },
+    "tt0245429": {
+      "titre": "USS Indianapolis",
+      "annee": 2016,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335943",
+      "genres": [
+        "War",
+        "Drama",
+        "History"
+      ],
+      "note": 5.3,
+      "votes": 7000
+    },
+    "tt1028528": {
+      "titre": "Walkyrie",
+      "annee": 2008,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335947",
+      "genres": [
+        "Drama",
+        "History",
+        "Thriller"
+      ],
+      "note": 7.1,
+      "votes": 267000
+    },
+    "tt0367279": {
+      "titre": "La Chute",
+      "annee": 2004,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:26:21.335951",
+      "genres": [
+        "Biography",
+        "Drama",
+        "History"
+      ],
+      "note": 8.2,
+      "votes": 367000
+    },
+    "tt4807408": {
+      "titre": "The Best of Enemies",
+      "annee": 2019,
+      "rating": "liked",
+      "date_ajout": "2026-01-20T16:37:45.894062",
+      "genres": [
+        "Biography",
+        "Drama",
+        "History"
+      ],
+      "note": 7.3,
+      "votes": 21470.0
     }
   },
   "date_creation": "2026-01-19T16:37:11.566187"
