@@ -54,12 +54,12 @@ plt.rcParams['grid.alpha'] = 0.3
 # ==========================================
 
 PROJECT_ROOT = get_project_root()
-DATA_DIR = PROJECT_ROOT / "data" / "processed"
+DATA_DIR = PROJECT_ROOT / "data" 
 
 @st.cache_data
 def load_excel_data():
     """Charge les données Excel"""
-    excel_path = DATA_DIR / 'Cinemas_existants_creuse.xlsx'
+    excel_path = DATA_DIR / "processed" / 'Cinemas_existants_creuse.xlsx'
     
     if not excel_path.exists():
         return None
@@ -91,7 +91,7 @@ def load_excel_data():
 @st.cache_data
 def load_imdb_data():
     """Charge le dataset IMDb avec support des titres français"""
-    imdb_path = DATA_DIR / 'imdb_complet_avec_tags'
+    imdb_path = DATA_DIR / 'PARQUETS' / 'imdb_complet_avec_cast.parquet'  # ← NOUVEAU FICHIER
     
     if not imdb_path.exists():
         st.error(f"❌ Fichier non trouvé : {imdb_path}")
@@ -1061,6 +1061,26 @@ elif page == "💡 Recommandations":
                             
                             # Barre de progression du score de recommandation
                             st.progress(score_reco / 100, text=f"Correspondance : {score_reco:.0f}%")
+                            
+                            # AJOUTER EXPANDER POUR SYNOPSIS
+                            with st.expander("📄 Voir le synopsis"):
+                                st.markdown("**📝 Synopsis**")
+                                synopsis = film_enrichi.get('synopsis', 'Synopsis non disponible.')
+                                st.write(synopsis)
+                                
+                                st.markdown("---")
+                                
+                                # Réalisateur
+                                if film_enrichi.get('director') and film_enrichi['director'] != 'Inconnu':
+                                    st.markdown(f"**🎬 Réalisateur** : {film_enrichi['director']}")
+                                
+                                # Acteurs
+                                if film_enrichi.get('cast') and len(film_enrichi['cast']) > 0:
+                                    st.markdown(f"**👥 Acteurs** : {', '.join(film_enrichi['cast'][:5])}")
+                                
+                                # Durée
+                                if film_enrichi.get('runtime'):
+                                    st.markdown(f"**⏱️ Durée** : {film_enrichi['runtime']} min")
                         
                         with col_actions:
                             # Vérifier si déjà vu
@@ -1267,6 +1287,20 @@ elif page == "💡 Recommandations":
                                                 st.caption(enriched['title'][:25] + ('...' if len(enriched['title']) > 25 else ''))
                                                 if enriched['rating']:
                                                     st.caption(f"⭐ {enriched['rating']:.1f}")
+                                                
+                                                # AJOUTER EXPANDER POUR SYNOPSIS
+                                                with st.expander("📄 Détails"):
+                                                    st.markdown("**📝 Synopsis**")
+                                                    st.write(enriched.get('synopsis', 'Synopsis non disponible'))
+                                                    
+                                                    if enriched.get('director') and enriched['director'] != 'Inconnu':
+                                                        st.caption(f"🎬 {enriched['director']}")
+                                                    
+                                                    if enriched.get('runtime'):
+                                                        st.caption(f"⏱️ {enriched['runtime']} min")
+                                                    
+                                                    if enriched.get('genres'):
+                                                        st.caption(f"🎭 {', '.join(enriched['genres'][:2])}")
                                     else:
                                         st.caption("Aucune recommandation")
                                 else:
@@ -1324,6 +1358,20 @@ elif page == "💡 Recommandations":
                                                 st.caption(enriched['title'][:20] + '...' if len(enriched['title']) > 20 else enriched['title'])
                                                 if enriched['rating']:
                                                     st.caption(f"⭐ {enriched['rating']:.1f}")
+                                                
+                                                # AJOUTER EXPANDER POUR SYNOPSIS
+                                                with st.expander("📄 Détails"):
+                                                    st.markdown("**📝 Synopsis**")
+                                                    st.write(enriched.get('synopsis', 'Synopsis non disponible'))
+                                                    
+                                                    if enriched.get('director') and enriched['director'] != 'Inconnu':
+                                                        st.caption(f"🎬 {enriched['director']}")
+                                                    
+                                                    if enriched.get('runtime'):
+                                                        st.caption(f"⏱️ {enriched['runtime']} min")
+                                                    
+                                                    if enriched.get('genres'):
+                                                        st.caption(f"🎭 {', '.join(enriched['genres'][:2])}")
                                     else:
                                         st.caption("Aucune recommandation")
                                 else:
