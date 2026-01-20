@@ -1,0 +1,15 @@
+{
+  "username": "utilisateur",
+  "films_vus": {
+    "tt0463998": {
+      "titre": "Freedom Writers",
+      "annee": 2007,
+      "rating": "liked",
+      "date_ajout": "2026-01-19T16:16:24.424952",
+      "genres": "Biography,Crime,Drama",
+      "note": 7.6,
+      "votes": 91993.0
+    }
+  },
+  "date_creation": "2026-01-19T16:16:24.424924"
+}

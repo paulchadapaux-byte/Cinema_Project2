@@ -1,0 +1,33 @@
+{
+  "username": "paul",
+  "films_vus": {
+    "tt0463998": {
+      "titre": "Freedom Writers",
+      "annee": 2007,
+      "rating": "liked",
+      "date_ajout": "2026-01-19T16:37:11.566236",
+      "genres": "Biography,Crime,Drama",
+      "note": 7.6,
+      "votes": 91993.0
+    },
+    "tt1302011": {
+      "titre": "Kung Fu Panda 2",
+      "annee": 2011,
+      "rating": "liked",
+      "date_ajout": "2026-01-19T22:53:38.715888",
+      "genres": "Action,Adventure,Animation",
+      "note": 7.3,
+      "votes": 351017.0
+    },
+    "tt0441773": {
+      "titre": "Kung Fu Panda",
+      "annee": 2008,
+      "rating": "liked",
+      "date_ajout": "2026-01-19T22:54:26.684402",
+      "genres": "Action,Adventure,Animation",
+      "note": 7.6,
+      "votes": 570064.0
+    }
+  },
+  "date_creation": "2026-01-19T16:37:11.566187"
+}
