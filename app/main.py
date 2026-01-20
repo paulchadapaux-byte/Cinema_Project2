@@ -648,7 +648,6 @@ if page == "🏠 Accueil":
     """)
 
 elif page == "🎬 Films à l'affiche":
-    st.info("Les informations de cette page (visuels et informations) sont chargées grâce à l'API IMDB. \n\n La requête se fait sur les films actuellement proposés en salle en France.", icon="ℹ️")
     st.title("🎬 Films à l'affiche en France")
     st.markdown("Découvrez tous les films en salles maintenant et ceux qui arrivent bientôt !") 
     
@@ -668,6 +667,8 @@ elif page == "🎬 Films à l'affiche":
     if trailers_disponibles:
         st.markdown("### 🎥 Bande-annonce du moment")
         
+        # Sélectionner un trailer (le premier avec la meilleure popularité)
+        # On pourrait aussi faire random.choice(list(trailers_disponibles.values()))
         films_avec_trailers = [
             (key, info) for key, info in trailers_disponibles.items()
         ]
@@ -1206,9 +1207,9 @@ elif page == "💡 Recommandations":
                             st.image(film_enrichi['poster_url'], use_container_width=True)
                         
                         with col_info:
-                            # Affichage bilingue
-                            from utils import format_movie_display
-                            display_title = format_movie_display(movie, show_both_titles=True)
+                            # Affichage français uniquement
+                            from utils import get_display_title
+                            display_title = get_display_title(movie, prefer_french=True, include_year=True)
                             rating = movie.get('note', movie.get('averageRating', 0))
                             votes = movie.get('votes', movie.get('numVotes', 0))
                             
@@ -1225,15 +1226,53 @@ elif page == "💡 Recommandations":
                             
                             # Acteurs si recherche acteur
                             if search_type_param in ['actor', 'all']:
-                                if 'acteurs' in movie.index and isinstance(movie.get('acteurs'), list) and len(movie['acteurs']) > 0:
-                                    actors_str = ", ".join(movie['acteurs'][:3])
-                                    st.caption(f"👥 {actors_str}")
+                                if 'acteurs' in movie.index and hasattr(movie.get('acteurs'), '__iter__') and not isinstance(movie.get('acteurs'), str):
+                                    try:
+                                        acteurs_list = list(movie['acteurs'])[:3]
+                                        actors_str = ", ".join(acteurs_list)
+                                        st.caption(f"👥 {actors_str}")
+                                    except:
+                                        pass
                         
                         with col_action:
+                            # Bouton pour voir les similaires
+                            show_similar_key = f"show_similar_{idx}"
                             if st.button(f"🎬 Voir similaires", key=f"tab2_reco_{idx}", use_container_width=True):
-                                st.session_state.selected_movie_index = movie.name
-                                st.session_state.selected_movie_title = display_title
+                                # Toggle : si déjà affiché, cacher, sinon afficher
+                                if show_similar_key in st.session_state and st.session_state[show_similar_key]:
+                                    st.session_state[show_similar_key] = False
+                                else:
+                                    st.session_state[show_similar_key] = True
                                 st.rerun()
+                        
+                        # Afficher les films similaires en carrousel si demandé
+                        if show_similar_key in st.session_state and st.session_state[show_similar_key]:
+                            st.markdown("---")
+                            st.caption(f"**🎬 Films similaires à {display_title} :**")
+                            
+                            try:
+                                # Générer les recommandations
+                                movie_idx = movie.name
+                                if movie_idx in df_movies.index:
+                                    reco_df, method = get_recommendations(df_movies, movie_idx, n=6)
+                                    
+                                    if len(reco_df) > 0:
+                                        # Afficher en carrousel (colonnes)
+                                        cols = st.columns(6)
+                                        for i, (_, reco_movie) in enumerate(reco_df.iterrows()):
+                                            with cols[i]:
+                                                # Enrichir pour l'affiche
+                                                enriched = enrich_movie_with_tmdb(reco_movie)
+                                                st.image(enriched['poster_url'], use_container_width=True)
+                                                st.caption(enriched['title'][:25] + ('...' if len(enriched['title']) > 25 else ''))
+                                                if enriched['rating']:
+                                                    st.caption(f"⭐ {enriched['rating']:.1f}")
+                                    else:
+                                        st.caption("Aucune recommandation")
+                                else:
+                                    st.caption("Film non trouvé")
+                            except Exception as e:
+                                st.caption(f"Erreur : {str(e)}")
                     
                     else:
                         # Sans affiche (compact)
@@ -1243,9 +1282,9 @@ elif page == "💡 Recommandations":
                             st.markdown(f"**{idx+1}.**")
                         
                         with col2:
-                            # Affichage bilingue
-                            from utils import format_movie_display
-                            display_title = format_movie_display(movie, show_both_titles=True)
+                            # Affichage français uniquement
+                            from utils import get_display_title
+                            display_title = get_display_title(movie, prefer_french=True, include_year=True)
                             rating = movie.get('note', movie.get('averageRating', 0))
                             votes = movie.get('votes', movie.get('numVotes', 0))
                             
@@ -1259,129 +1298,41 @@ elif page == "💡 Recommandations":
                                 genres_str = " · ".join(movie['genre'][:3])
                                 st.caption(f"🎭 {genres_str}")
                             
+                            # Bouton pour voir similaires
+                            show_similar_key = f"show_similar_{idx}"
                             if st.button(f"🎬 Voir les recommandations", key=f"tab2_reco_{idx}"):
-                                st.session_state.selected_movie_index = movie.name
-                                st.session_state.selected_movie_title = display_title
+                                if show_similar_key in st.session_state and st.session_state[show_similar_key]:
+                                    st.session_state[show_similar_key] = False
+                                else:
+                                    st.session_state[show_similar_key] = True
                                 st.rerun()
+                        
+                        # Afficher les films similaires si demandé
+                        if show_similar_key in st.session_state and st.session_state[show_similar_key]:
+                            st.caption(f"**Films similaires à {display_title} :**")
+                            try:
+                                movie_idx = movie.name
+                                if movie_idx in df_movies.index:
+                                    reco_df, method = get_recommendations(df_movies, movie_idx, n=6)
+                                    
+                                    if len(reco_df) > 0:
+                                        cols = st.columns(6)
+                                        for i, (_, reco_movie) in enumerate(reco_df.iterrows()):
+                                            with cols[i]:
+                                                enriched = enrich_movie_with_tmdb(reco_movie)
+                                                st.image(enriched['poster_url'], use_container_width=True)
+                                                st.caption(enriched['title'][:20] + '...' if len(enriched['title']) > 20 else enriched['title'])
+                                                if enriched['rating']:
+                                                    st.caption(f"⭐ {enriched['rating']:.1f}")
+                                    else:
+                                        st.caption("Aucune recommandation")
+                                else:
+                                    st.caption("Film non trouvé")
+                            except Exception as e:
+                                st.caption(f"Erreur : {str(e)}")
                     
                     st.markdown("---")
         
-        # Affichage des recommandations
-        if 'selected_movie_index' in st.session_state:
-            
-            selected_idx = st.session_state.selected_movie_index
-            selected_title = st.session_state.selected_movie_title
-            
-            st.markdown("---")
-            st.subheader(f"💡 Films similaires à : **{selected_title}**")
-            
-            # Trouver le film dans df_movies par index
-            # selected_idx peut être l'index de la recherche, il faut le bon index dans df_movies
-            try:
-                # Récupérer le film à partir de l'index de recherche
-                if selected_idx in df_movies.index:
-                    movie_to_recommend = df_movies.loc[selected_idx]
-                else:
-                    # Si l'index n'existe pas, chercher par tconst si disponible
-                    st.error("Film non trouvé dans la base de données")
-                    st.stop()
-                
-                with st.spinner("🔄 Génération des recommandations..."):
-                    reco_df, method = get_recommendations(df_movies, selected_idx, n=8)
-                
-                st.caption(f"Méthode : {method}")
-                
-                if len(reco_df) == 0:
-                    st.warning("Aucune recommandation trouvée pour ce film")
-                
-                else:
-                    # Enrichir avec API TMDb
-                    enriched_movies = []
-                    
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    for i, (_, movie) in enumerate(reco_df.iterrows()):
-                        status_text.text(f"Chargement {i+1}/{len(reco_df)}...")
-                        progress_bar.progress((i+1) / len(reco_df))
-                        
-                        enriched = enrich_movie_with_tmdb(movie)
-                        enriched_movies.append(enriched)
-                    
-                    progress_bar.empty()
-                    status_text.empty()
-                    
-                    # Afficher les films enrichis
-                    cols = st.columns(4)
-                    
-                    for i, film in enumerate(enriched_movies):
-                        with cols[i % 4]:
-                            st.image(film['poster_url'], use_container_width=True)
-                            st.markdown(f"**{film['title'][:30]}{'...' if len(film['title']) > 30 else ''}**")
-                            
-                            if film['rating']:
-                                st.markdown(f"⭐ {film['rating']:.1f}/10")
-                            
-                            if film['year']:
-                                st.caption(f"📅 {film['year']}")
-                            
-                            if film['director'] != 'Inconnu':
-                                st.caption(f"🎬 {film['director'][:20]}")
-                            
-                            if film['genres']:
-                                genres_str = ', '.join(film['genres'][:2])
-                                st.caption(f"🎭 {genres_str}")
-                            
-                            if st.button("📄 Détails", key=f"tab2_details_{i}"):
-                                st.session_state.show_detail_index = i
-            
-            except Exception as e:
-                st.error(f"Erreur lors de la génération des recommandations : {e}")
-                import traceback
-                st.code(traceback.format_exc())
-                
-                # Détails du film sélectionné
-                if 'show_detail_index' in st.session_state:
-                    detail_idx = st.session_state.show_detail_index
-                    film = enriched_movies[detail_idx]
-                    
-                    st.markdown("---")
-                    st.subheader(f"📄 Détails : {film['title']}")
-                    
-                    col1, col2 = st.columns([1, 2])
-                    
-                    with col1:
-                        st.image(film['poster_url'], width=300)
-                    
-                    with col2:
-                        st.markdown(f"### {film['title']}")
-                        
-                        if film['year']:
-                            st.markdown(f"**📅 Année** : {film['year']}")
-                        
-                        if film['rating']:
-                            st.markdown(f"**⭐ Note** : {film['rating']:.1f}/10")
-                        
-                        if film['runtime']:
-                            st.markdown(f"**⏱️ Durée** : {film['runtime']} min")
-                        
-                        if film['director'] != 'Inconnu':
-                            st.markdown(f"**🎬 Réalisateur** : {film['director']}")
-                        
-                        if film['genres']:
-                            st.markdown(f"**🎭 Genres** : {', '.join(film['genres'])}")
-                        
-                        if film['cast']:
-                            st.markdown(f"**👥 Acteurs** : {', '.join(film['cast'])}")
-                        
-                        st.markdown("---")
-                        st.markdown(f"**📝 Synopsis** : {film['synopsis']}")
-                    
-                    if st.button("❌ Fermer", key="tab2_close_detail"):
-                        del st.session_state.show_detail_index
-                        st.rerun()
-
-
 elif page == "❤️ Mes Films Favoris":
     st.title("❤️ Mes Films Favoris")
     
@@ -1910,353 +1861,667 @@ elif page == "🎭 Activités Annexes":
 # ==========================================
 
 elif page == "📊 Espace B2B":
+    if st.button("🚪 Se déconnecter"):
+        st.session_state.authenticated = False
+        st.rerun()
+        
+    st.title("Espace B2B - Votre cinéma en Creuse")
     
-    st.title("📊 Espace B2B - Votre cinéma en Creuse")
-    
-    # Vérifier si l'utilisateur est connecté
-    if not st.session_state.get('authenticated', False):
-        st.warning("🔒 Accès réservé aux utilisateurs connectés")
-        st.info("👉 Connectez-vous dans le menu de gauche pour accéder à cette page")
-        st.markdown("---")
-        st.markdown("**Cette page contient :**")
-        st.markdown("- 📊 Analyse démographique de la Creuse")
-        st.markdown("- 💰 Analyse économique du marché")
-        st.markdown("- 🎬 Données du marché cinéma")
-        st.markdown("- 📄 Export des données")
+    if not check_password():
         st.stop()
     
-    # Utilisateur connecté - afficher le contenu
-    username = st.session_state.get('authenticated_user', 'Utilisateur')
-    st.success(f"👤 Connecté en tant que **{username}**")
+    # Métriques clés
+    st.subheader("📊 Métriques clés de votre département")
     
-    # Métriques
-    st.subheader("📊 Métriques clés")
-    
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Population Creuse", "115 527 hab", "−0.4% (5 ans)")
     with col2:
         st.metric("Âge médian", "51.2 ans", "+4.3 ans")
     with col3:
         st.metric("Cinémas actifs", len(CINEMAS))
-    with col4:
-        st.metric("Films catalogue", f"{len(df_movies):,}")
     
-    st.caption("*Source : Insee*")
+    st.caption("*Source : Insee, recensements de la population 2012, 2017 et 2023*")
     st.markdown("---")
     
-    # Onglets
+    # Onglets de l'étude
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 Analyse démographique",
-        "💰 Analyse économique", 
-        "🎬 Marché cinéma",
-        "📄 Export",
-        "🔧 Diagnostic"
+        "📊 Analyse de marché",
+        "📈 Analyse concurrentielle",
+        "💡 Analyse interne",
+        "🪖 SWOT",
+        "📄 Export"
     ])
     
     with tab1:
-        st.header("📊 Analyse démographique")
-        
-        if data and 'pop_c' in data:
-            st.subheader("👥 Structure de la population")
-            
-            df_pop = data['pop_c']
-            
-            df_pop_long = pd.melt(
-                df_pop, 
-                id_vars='Age', 
-                value_vars=['Men', 'Women'], 
-                var_name='Gender', 
-                value_name='Population'
+        # Initialiser l'index
+        if 'graph_index_tab1' not in st.session_state:
+            st.session_state.graph_index_tab1 = 0
+
+        graphs = [
+            {"title": "👥 Consommateurs : Structure de la population locale", "key": "population"},
+            {"title": "🗺️ Evolution des attentes des consommateurs européens", "key": "trend"},
+            {"title": "💰 Evolution des recettes des cinémas français", "key": "revenues"},
+        ]
+
+        # Navigation
+        col1, col2, col3 = st.columns([1, 2, 1])
+
+        with col1:
+            if st.button("◀ Précédent", key='prev_tab1', use_container_width=True):
+                st.session_state.graph_index_tab1 = (st.session_state.graph_index_tab1 - 1) % len(graphs)
+                st.rerun()
+
+        with col2:
+            st.markdown(
+                f"<div style='text-align: center; padding: 8px; font-size: 16px; font-weight: bold;'>"
+                f"{st.session_state.graph_index_tab1 + 1} / {len(graphs)}"
+                f"</div>",
+                unsafe_allow_html=True
             )
-            
-            total_pop = df_pop_long.groupby('Age')['Population'].sum()
-            df_pop_long['Percentage'] = df_pop_long.apply(
-                lambda row: (row['Population'] / total_pop[row['Age']]) * 100, 
-                axis=1
-            )
-            
-            fig, ax = create_styled_barplot(
-                data=df_pop_long,
-                x='Age',
-                y='Percentage',
-                hue='Gender',
-                title='Répartition par âge et genre',
-                xlabel="Groupe d'âge",
-                ylabel='Pourcentage (%)',
-                rotation=45,
-                figsize=(12, 6),
-                palette=[PALETTE_CREUSE['bleu'], PALETTE_CREUSE['rouge']],
-                show_values=True,
-                value_format='%.1f%%'
-            )
-            
-            st.pyplot(fig)
-            plt.close(fig)
-            
-            st.markdown("---")
-            
-            st.info("📊 **Constat** : Population vieillissante avec majorité de +45 ans")
-            
-            # Diplômes
-            if 'dip_c' in data:
-                st.subheader("🎓 Niveau de diplôme")
+
+        with col3:
+            if st.button("Suivant ▶", key="next_tab1", use_container_width=True):
+                st.session_state.graph_index_tab1 = (st.session_state.graph_index_tab1 + 1) % len(graphs)
+                st.rerun()
+
+        current = graphs[st.session_state.graph_index_tab1]
+        st.markdown(f"### {current['title']}")
+
+        graph_placeholder = st.empty()
+
+        with graph_placeholder.container():
+            if current['key'] == "population":
+                col1, col2 = st.columns(2)
                 
-                df_dip = data['dip_c']
+                with col1:
+                    # Préparer les données
+                    df_pop_long = pd.melt(
+                        data['pop_c'], 
+                        id_vars='Age', 
+                        value_vars=['Men', 'Women'], 
+                        var_name='Gender', 
+                        value_name='Population'
+                    )
+                    
+                    # Calculer les pourcentages
+                    total_pop = df_pop_long.groupby('Age')['Population'].sum()
+                    df_pop_long['Percentage'] = df_pop_long.apply(
+                        lambda row: (row['Population'] / total_pop[row['Age']]) * 100, 
+                        axis=1
+                    )
+                    
+                    # Graphique
+                    fig, ax = create_styled_barplot(
+                        data=df_pop_long,
+                        x='Age',
+                        y='Percentage',
+                        hue='Gender',
+                        title='Répartition par âge',
+                        xlabel="Groupe d'âge",
+                        ylabel='Pourcentage (%)',
+                        rotation=45,
+                        figsize=(10, 6),
+                        palette=[PALETTE_CREUSE['bleu'], PALETTE_CREUSE['rouge']],
+                        show_values=True,
+                        value_format='%.1f%%'
+                    )
+                    
+                    st.pyplot(fig)
+                    plt.close(fig)
                 
-                fig, ax = create_styled_barplot(
-                    data=df_dip,
-                    x='Diplome',
-                    y='Percentage',
-                    title='Répartition par niveau de diplôme',
-                    xlabel='Niveau de diplôme',
-                    ylabel='Pourcentage (%)',
-                    rotation=45,
-                    figsize=(12, 6),
-                    show_values=True
+                with col2:
+                    # Calculer les pourcentages
+                    data['kids_c']['Percentage'] = (data['kids_c']['Total'] / data['kids_c']['Total'].sum()) * 100
+                    
+                    fig, ax = create_styled_barplot(
+                        data=data['kids_c'],
+                        x='Family_Type',
+                        y='Percentage',
+                        title='Type de cellule familiale',
+                        xlabel='Type',
+                        ylabel='Pourcentage (%)',
+                        rotation=45,
+                        figsize=(10, 6),
+                        palette=PALETTE_CREUSE['gradient'],
+                        show_values=True,
+                        value_format='%.1f%%'
+                    )
+                    
+                    st.pyplot(fig)
+                    plt.close(fig)
+                
+                st.caption("*Source : Insee, étude 2022*")
+                
+                st.info("""
+                📊 **Constat** : 
+                - Population vieillissante avec 60% de plus de 45 ans
+                - 55% de couples sans enfants, 30% de couples avec enfants et 15% de cellules monoparentales
+                """)
+                
+                st.success("""
+                💡 **Recommandations** :
+                - Films classiques et patrimoniaux
+                - Séances matinales adaptées
+                - Dynamiser l'offre pour attirer une plus grande proportion de jeunes
+                """)
+                
+            elif current['key'] == "trend":
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    try:
+                        st.image(
+                            r"C:/Users/paulc/Documents/PROJET 2/data/images/recovery_rates_post_covid.png",
+                            caption="Retour en salles, période post-covid"
+                        )
+                    except:
+                        st.warning("📊 Image non disponible : recovery_rates_post_covid.png")
+                        st.info("L'image devrait montrer les taux de retour en salle post-COVID")
+                
+                with col2:
+                    try:
+                        st.image(
+                            r"C:/Users/paulc/Documents/PROJET 2/data/images/origin_of_films.png",
+                            caption="Origine des films visionnés en Europe"
+                        )
+                    except:
+                        st.warning("📊 Image non disponible : origin_of_films.png")
+                        st.info("L'image devrait montrer l'origine des films visionnés en Europe")
+                
+                st.info("""
+                📊 **Constat** :
+                
+                **Baisse de fréquentation en salles**  
+                Depuis la pandémie, beaucoup moins de spectateurs se rendent dans les salles de cinéma, surtout en zones rurales.
+                
+                **Difficultés en zone rurale**  
+                Les salles rurales peinent à attirer les spectateurs, accentuant la désertification culturelle hors des villes.
+                
+                **Reprise urbaine progressive**  
+                Dans les villes, la fréquentation des cinémas augmente lentement grâce à des événements spéciaux et des sorties nationales.
+                
+                **Origine des films**  
+                Une majorité des films visionnés sur des plateformes de streaming/location/vente est d'origine américaine et marque une préférence du public pour les blockbusters.
+                """)
+                
+                st.success("""
+                💡 **Recommandations** :
+                
+                **Créer de la valeur ajoutée au cinéma**  
+                Apporter une réelle différence dans l'expérience de visionnage pour faire revenir la clientèle pré-covid (fauteuils, son, lumières)
+                
+                **Ajuster l'offre de films**  
+                Bien que les utilisateurs web préfèrent les films américains, continuer à proposer une offre diversifiée
+                """)
+                
+            elif current['key'] == "revenues":
+                st.markdown("### Analyse des ventes de confiseries")
+                
+                fig, ax = plt.subplots(figsize=(12, 6))
+                sns.set_style("whitegrid")
+                
+                # Ligne 1 : Part des spectateurs
+                color1 = PALETTE_CREUSE['principal']
+                ax.plot(
+                    data['candies_c']['Année'],
+                    data['candies_c']['Part des spectateurs achetant confiseries/boissons (%)'],
+                    color=color1,
+                    linewidth=2.5,
+                    marker='o',
+                    label='Part des spectateurs (%)'
                 )
+                ax.set_xlabel('Année', fontsize=12, fontweight='bold')
+                ax.set_ylabel('Part des spectateurs (%)', fontsize=12, fontweight='bold', color=color1)
+                ax.tick_params(axis='y', labelcolor=color1)
+                
+                # Ligne 2 : Indice CA
+                ax2 = ax.twinx()
+                color2 = PALETTE_CREUSE['accent']
+                ax2.plot(
+                    data['candies_c']['Année'],
+                    data['candies_c']['Indice CA confiseries (base 2019 = 100)'],
+                    color=color2,
+                    linewidth=2.5,
+                    marker='s',
+                    label='Indice CA (base 100)'
+                )
+                ax2.set_ylabel('Indice CA (base 100)', fontsize=12, fontweight='bold', color=color2)
+                ax2.tick_params(axis='y', labelcolor=color2)
+                
+                # Titre et légende
+                ax.set_title(
+                    'Évolution des ventes de confiseries et boissons',
+                    fontsize=16,
+                    fontweight='bold',
+                    pad=20
+                )
+                
+                lines1, labels1 = ax.get_legend_handles_labels()
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax.legend(lines1 + lines2, labels1 + labels2, loc='best', fontsize=10)
+                
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
                 
                 st.pyplot(fig)
                 plt.close(fig)
+                
+                st.caption('Sources: Statista, CNC, Boxoffice Pro')
+                
+                st.markdown("### Analyse des dépenses publicitaires")
+                
+                try:
+                    st.image(
+                        r"C:/Users/paulc/Documents/PROJET 2/data/images/advertising_expenditures.png",
+                        caption="Dépenses publicitaires"
+                    )
+                except:
+                    st.warning("📊 Image non disponible : advertising_expenditures.png")
+                    st.info("L'image devrait montrer l'évolution des dépenses publicitaires dans le secteur du cinéma")
+                
+                st.info("""
+                📊 **Constat** :
+                
+                **Consommation sur place constante**  
+                Bien que la fréquentation des cinémas ait diminué depuis la sortie du covid, les habitudes de consommation restent inchangées et les revenus annexes sont constants.
+                
+                **Revenus publicitaires**  
+                Les recettes publicitaires (souvent locales) continuent de diminuer au profit d'internet et de la télévision, canaux qui offrent un reach plus élevé.
+                """)
+                
+                st.success("""
+                💡 **Recommandations** :
+                
+                **Augmenter l'offre sur place**  
+                Les clients dépensent facilement (1/2) dans des produits autres que la place de cinéma. Au-delà des confiseries, il faut augmenter l'offre de produits complémentaires (façon Disneyland)
+                
+                **Compenser la perte de revenus publicitaires**  
+                Par la location de salles, pour des événements d'entreprise, etc.
+                """)
         
-        else:
-            st.warning("Données démographiques non disponibles")
-    
     with tab2:
-        st.header("💰 Analyse économique")
-        
-        if data and 'streaming_price' in data and 'mensual_price' in data:
-            st.subheader("💵 Comparaison Prix : Streaming vs Cinéma")
-            
-            df_streaming = data['streaming_price']
-            df_mensual = data['mensual_price']
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("### 🎬 Prix Cinéma")
-                st.dataframe(df_mensual, use_container_width=True)
-            
-            with col2:
-                st.markdown("### 📺 Prix Streaming")
-                st.dataframe(df_streaming, use_container_width=True)
-            
-            st.markdown("---")
-            
-            # Comparaison
-            st.subheader("📊 Analyse comparative")
-            
-            avg_cinema = df_mensual['Price'].mean()
-            avg_streaming = df_streaming['Price'].mean()
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Prix moyen cinéma", f"{avg_cinema:.2f}€")
-            with col2:
-                st.metric("Prix moyen streaming", f"{avg_streaming:.2f}€")
-            with col3:
-                diff = ((avg_cinema - avg_streaming) / avg_streaming) * 100
-                st.metric("Différence", f"{diff:+.1f}%")
-            
-            st.info(
-                """
-                💡 **Insight** : Le cinéma reste plus cher que le streaming, 
-                mais offre une expérience unique et sociale que le streaming ne peut pas remplacer.
-                """
+        # Initialiser l'index
+        if 'graph_index_tab2' not in st.session_state:
+            st.session_state.graph_index_tab2 = 0
+
+        graphs = [
+            {"title": "Programmation généralistes Vs. indépendants", "key": "prog"},
+            {"title": "💰 Prix des abonnements", "key": "price"},
+        ]
+
+        # Navigation
+        col1, col2, col3 = st.columns([1, 2, 1])
+
+        with col1:
+            if st.button("◀ Précédent", key="prev_tab2", use_container_width=True):
+                st.session_state.graph_index_tab2 = (st.session_state.graph_index_tab2 - 1) % len(graphs)
+                st.rerun()
+
+        with col2:
+            st.markdown(
+                f"<div style='text-align: center; padding: 8px; font-size: 16px; font-weight: bold;'>"
+                f"{st.session_state.graph_index_tab2 + 1} / {len(graphs)}"
+                f"</div>",
+                unsafe_allow_html=True
             )
-        
-        else:
-            st.warning("Données économiques non disponibles")
+
+        with col3:
+            if st.button("Suivant ▶", key="next_tab2", use_container_width=True):
+                st.session_state.graph_index_tab2 = (st.session_state.graph_index_tab2 + 1) % len(graphs)
+                st.rerun()
+
+        current = graphs[st.session_state.graph_index_tab2]
+        st.markdown(f"### {current['title']}")
+
+        graph_placeholder = st.empty()
+
+        with graph_placeholder.container():
+            if current['key'] == "prog":
+                col1, col2 = st.columns([1, 2])
+                
+                with col1:
+                    # Camembert
+                    fig, ax = plt.subplots(figsize=(8, 8))
+                    
+                    colors = PALETTE_CREUSE['gradient']
+                    
+                    wedges, texts, autotexts = ax.pie(
+                        data['movies_type_g']['Part des entrées nationales'],
+                        labels=data['movies_type_g']['Type de films'],
+                        autopct='%1.1f%%',
+                        colors=colors,
+                        startangle=90,
+                        textprops={'fontsize': 10, 'fontweight': 'bold'}
+                    )
+                    
+                    for autotext in autotexts:
+                        autotext.set_color('white')
+                        autotext.set_fontsize(11)
+                        autotext.set_fontweight('bold')
+                    
+                    ax.set_title(
+                        'Répartition des types de films',
+                        fontsize=14,
+                        fontweight='bold',
+                        pad=20
+                    )
+                    
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close(fig)
+                    
+                    st.caption('Sources: CNC, la fréquentation des salles de cinéma 2024')
+                
+                with col2:
+                    # Préparer les données
+                    df_prog_melt = data['prog_g'].melt(
+                        id_vars='Type de films',
+                        value_vars=['Grandes chaînes (multiplexes)', 'Cinémas indépendants / Art & Essai'],
+                        var_name='Type de cinéma',
+                        value_name='Pourcentage'
+                    )
+                    
+                    # Graphique
+                    fig, ax = create_styled_barplot(
+                        data=df_prog_melt,
+                        x='Type de cinéma',
+                        y='Pourcentage',
+                        hue='Type de films',
+                        title='Programmation généralistes Vs. indépendants',
+                        xlabel='Type de cinéma',
+                        ylabel='Pourcentage (%)',
+                        rotation=0,
+                        figsize=(12, 6),
+                        palette=PALETTE_CREUSE['gradient'],
+                        show_values=True,
+                        value_format='%.1f%%'
+                    )
+                    
+                    st.pyplot(fig)
+                    plt.close(fig)
+                    
+                    st.caption('Sources: CNC, bilan de la diffusion des films en salle')
+                    
+            elif current['key'] == "price":
+                # Streaming prices
+                df_stream_melt = data['streaming_price'].melt(
+                    id_vars='Plateforme',
+                    value_vars=['Prix mini mensuel', 'Prix maxi mensuel'],
+                    var_name="Type d'abonnement",
+                    value_name="Prix"
+                )
+                
+                # Nettoyer
+                df_stream_melt = df_stream_melt[df_stream_melt['Prix'] != '-   € ']
+                df_stream_melt = df_stream_melt.dropna(subset=['Prix'])
+                
+                # Convertir en numérique
+                if df_stream_melt['Prix'].dtype == 'object':
+                    df_stream_melt['Prix'] = (
+                        df_stream_melt['Prix']
+                        .str.replace('€', '', regex=False)
+                        .str.replace(',', '.', regex=False)
+                        .str.strip()
+                        .astype(float)
+                    )
+                
+                # Graphique
+                fig, ax = create_styled_barplot(
+                    data=df_stream_melt,
+                    x='Plateforme',
+                    y='Prix',
+                    hue="Type d'abonnement",
+                    title='Comparaison des abonnements streaming : mini vs maxi',
+                    xlabel='Plateforme de streaming',
+                    ylabel='Prix mensuel (€)',
+                    rotation=45,
+                    figsize=(14, 8),
+                    palette=[PALETTE_CREUSE['bleu'], PALETTE_CREUSE['rouge']],
+                    show_values=True,
+                    value_format='%.2f€'
+                )
+                
+                # Ligne de prix moyen
+                prix_moyen = df_stream_melt['Prix'].mean()
+                ax.axhline(
+                    y=prix_moyen,
+                    color=PALETTE_CREUSE['accent'],
+                    linestyle='--',
+                    linewidth=2,
+                    label=f'Prix moyen: {prix_moyen:.2f}€'
+                )
+                ax.legend()
+                
+                st.pyplot(fig)
+                plt.close(fig)
+                
+                # Métriques
+                col1, col2, col3 = st.columns(3)
+                
+                prix_mini_moy = df_stream_melt[
+                    df_stream_melt["Type d'abonnement"] == 'Prix mini mensuel'
+                ]['Prix'].mean()
+                
+                prix_maxi_moy = df_stream_melt[
+                    df_stream_melt["Type d'abonnement"] == 'Prix maxi mensuel'
+                ]['Prix'].mean()
+                
+                col1.metric("Prix moyen mini", f"{prix_mini_moy:.2f}€")
+                col2.metric("Prix moyen maxi", f"{prix_maxi_moy:.2f}€")
+                col3.metric("Écart moyen", f"{prix_maxi_moy - prix_mini_moy:.2f}€")
+                
+                st.caption('Sources: ariase.com, pathe.com, ugc.com')
+                
+                st.markdown("---")
+                
+                # Comparaison streaming vs cinéma
+                df_mensp_melt = data['mensual_price'].melt(
+                    id_vars='type',
+                    value_vars=['Prix mini mensuel moyen', 'Prix maxi mensuel moyen'],
+                    var_name='Classe prix',
+                    value_name='Prix mensuel moyen'
+                )
+                
+                df_mensp_melt = df_mensp_melt.dropna(subset=['Prix mensuel moyen'])
+                
+                # Graphique
+                fig, ax = create_styled_barplot(
+                    data=df_mensp_melt,
+                    x='type',
+                    y='Prix mensuel moyen',
+                    hue='Classe prix',
+                    title='Comparaison streaming vs cinéma : prix mensuels moyens',
+                    xlabel='Type de service',
+                    ylabel='Prix mensuel moyen (€)',
+                    rotation=0,
+                    figsize=(10, 6),
+                    palette=[PALETTE_CREUSE['bleu'], PALETTE_CREUSE['rouge']],
+                    show_values=True,
+                    value_format='%.2f€'
+                )
+                
+                # Personnaliser les labels X
+                ax.set_xticklabels(['Streaming', 'Cinéma'], fontsize=11)
+                
+                st.pyplot(fig)
+                plt.close(fig)
+                
+                # Métriques
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("### 📺 Streaming")
+                    prix_mini_stream = df_mensp_melt[
+                        (df_mensp_melt['type'] == 'streaming') &
+                        (df_mensp_melt['Classe prix'] == 'Prix mini mensuel moyen')
+                    ]['Prix mensuel moyen'].values[0]
+                    
+                    prix_maxi_stream = df_mensp_melt[
+                        (df_mensp_melt['type'] == 'streaming') &
+                        (df_mensp_melt['Classe prix'] == 'Prix maxi mensuel moyen')
+                    ]['Prix mensuel moyen'].values[0]
+                    
+                    st.metric("Prix mini moyen", f"{prix_mini_stream:.2f}€")
+                    st.metric("Prix maxi moyen", f"{prix_maxi_stream:.2f}€")
+                    st.metric("Écart", f"{prix_maxi_stream - prix_mini_stream:.2f}€")
+                
+                with col2:
+                    st.markdown("### 🎬 Cinéma")
+                    prix_mini_cinema = df_mensp_melt[
+                        (df_mensp_melt['type'] == 'cinema') &
+                        (df_mensp_melt['Classe prix'] == 'Prix mini mensuel moyen')
+                    ]['Prix mensuel moyen'].values[0]
+                    
+                    prix_maxi_cinema = df_mensp_melt[
+                        (df_mensp_melt['type'] == 'cinema') &
+                        (df_mensp_melt['Classe prix'] == 'Prix maxi mensuel moyen')
+                    ]['Prix mensuel moyen'].values[0]
+                    
+                    st.metric("Prix mini moyen", f"{prix_mini_cinema:.2f}€")
+                    st.metric("Prix maxi moyen", f"{prix_maxi_cinema:.2f}€")
+                    st.metric("Écart", f"{prix_maxi_cinema - prix_mini_cinema:.2f}€")
+                
+                st.caption('Sources: ariase.com, pathe.com, ugc.com')
     
     with tab3:
-        st.header("🎬 Marché du cinéma")
+        st.header("💡 Recommandations Stratégiques")
         
-        if data and 'cine_age_g' in data:
-            st.subheader("👥 Fréquentation par âge")
-            
-            df_age = data['cine_age_g']
-            
-            fig, ax = create_styled_barplot(
-                data=df_age,
-                x='Age',
-                y='Percentage',
-                title='Fréquentation cinéma par tranche d\'âge',
-                xlabel='Tranche d\'âge',
-                ylabel='Pourcentage (%)',
-                rotation=45,
-                figsize=(12, 6),
-                show_values=True
-            )
-            
-            st.pyplot(fig)
-            plt.close(fig)
-            
-            st.markdown("---")
+        st.markdown("""
+        ### 🎯 Service de Recommandation Personnalisé
         
-        if data and 'movies_type_g' in data:
-            st.subheader("🎭 Préférences de genres")
-            
-            df_types = data['movies_type_g']
-            
-            fig, ax = create_styled_barplot(
-                data=df_types,
-                x='Type',
-                y='Percentage',
-                title='Répartition des préférences par genre',
-                xlabel='Genre de film',
-                ylabel='Pourcentage (%)',
-                rotation=45,
-                figsize=(12, 6),
-                show_values=True
-            )
-            
-            st.pyplot(fig)
-            plt.close(fig)
+        #### Objectifs
+        1. **Adapter l'offre** aux préférences locales
+        2. **Fidéliser** le public existant
+        3. **Attirer** de nouveaux spectateurs
+        4. **Valoriser** le patrimoine cinématographique
+        
+        #### Fonctionnalités Proposées
+        - 🤖 **Algorithme de recommandation** basé sur les préférences
+        - 📱 **Application mobile** pour réservation
+        - 🎁 **Programme de fidélité** multi-cinémas
+        - 📧 **Newsletter personnalisée** hebdomadaire
+        - 🎬 **Événements thématiques** mensuels
+        
+        #### Axes de Développement
+        
+        **1. Diversification de la Programmation**
+        - Films classiques et patrimoine
+        - Cinéma d'auteur et Art & Essai
+        - Documentaires locaux
+        - Séances famille
+        
+        **2. Activités Complémentaires**
+        - Ciné-yoga et bien-être
+        - Rencontres avec réalisateurs
+        - Ateliers pédagogiques
+        - Ciné-concerts
+        
+        **3. Partenariats Locaux**
+        - Offices de tourisme
+        - Établissements scolaires
+        - Associations culturelles
+        - Commerces locaux
+        
+        #### Conditions de Réussite
+        
+        ✅ **Adhésion des gérants** et équipes  
+        ✅ **Communication efficace** (réseaux sociaux, presse locale)  
+        ✅ **Formation du personnel** aux outils numériques  
+        ✅ **Suivi régulier** des indicateurs (fréquentation, satisfaction)  
+        ✅ **Adaptation continue** aux retours usagers
+        """)
         
         st.markdown("---")
         
-        # Recommandations stratégiques
-        st.subheader("💡 Recommandations Stratégiques")
+        st.subheader("📊 Budget Prévisionnel")
         
-        st.markdown("""
-        ### 🎯 Axes de développement
+        budget_data = {
+            "Poste": [
+                "Développement application",
+                "Communication & Marketing",
+                "Formation personnel",
+                "Équipements numériques",
+                "Maintenance annuelle"
+            ],
+            "Montant": [
+                "15 000€",
+                "8 000€",
+                "3 000€",
+                "5 000€",
+                "4 000€/an"
+            ]
+        }
         
-        **1. Diversification de l'offre**
-        - Films patrimoine pour public senior
-        - Séances thématiques (soirées d'auteur, ciné-débat)
-        - Événements culturels annexes
+        st.table(pd.DataFrame(budget_data))
         
-        **2. Expérience client enrichie**
-        - Système de recommandation personnalisée (✅ intégré)
-        - Application mobile de réservation
-        - Programme de fidélité
-        
-        **3. Partenariats locaux**
-        - Collaboration avec offices de tourisme
-        - Partenariats écoles/associations
-        - Offres groupées hébergement + cinéma
-        
-        **4. Communication digitale**
-        - Présence réseaux sociaux renforcée
-        - Newsletter personnalisée
-        - Campagnes ciblées par tranche d'âge
-        """)
+        st.markdown("**Total investissement initial** : **31 000€**")
+        st.markdown("**Coût annuel de fonctionnement** : **4 000€**")
     
     with tab4:
+        st.header("🪖 Analyse SWOT")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            **💪 Forces**
+            - Cinémas de proximité
+            - Programmation Art & Essai
+            - Tarifs attractifs
+            - Lien social fort
+            """)
+            
+            st.markdown("""
+            **⚠️ Faiblesses**
+            - Baisse de fréquentation
+            - Équipements vieillissants
+            - Offre limitée
+            - Concurrence streaming
+            """)
+        
+        with col2:
+            st.markdown("""
+            **🚀 Opportunités**
+            - Tourisme culturel
+            - Événements spéciaux
+            - Partenariats locaux
+            - Diversification activités
+            """)
+            
+            st.markdown("""
+            **⚡ Menaces**
+            - Vieillissement population
+            - Exode rural
+            - Netflix, Disney+, etc.
+            - Concurrence urbaine
+            """)
+    
+    with tab5:
         st.header("📄 Export des Données")
         
-        st.markdown("### Télécharger les données pour analyse externe")
+        st.markdown("Téléchargez les données pour analyse externe.")
         
         col1, col2 = st.columns(2)
         
         with col1:
             csv_films = df_movies.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="📥 Catalogue Films (CSV)",
+                label="📥 Télécharger les films (CSV)",
                 data=csv_films,
-                file_name=f"films_creuse_{datetime.now().strftime('%Y%m%d')}.csv",
+                file_name="films_creuse_2026.csv",
                 mime="text/csv"
             )
         
         with col2:
-            if data and 'pop_c' in data:
-                csv_pop = data['pop_c'].to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="📥 Données Population (CSV)",
-                    data=csv_pop,
-                    file_name=f"population_creuse_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv"
-                )
-    
-    with tab5:
-        st.header("🔧 Diagnostic Technique")
-        
-        st.markdown("### Vérification des colonnes de titres")
-        st.info("Cette section permet de vérifier quelles colonnes de titres sont disponibles dans la base de données et si des titres français sont présents.")
-        
-        if st.button("🔍 Lancer le diagnostic", use_container_width=True):
-            with st.spinner("Analyse en cours..."):
-                # Lancer le diagnostic
-                results = check_title_columns(df_movies)
-                
-                # Afficher les résultats
-                st.success("✅ Diagnostic terminé")
-                st.markdown("---")
-                
-                # Colonnes de titres disponibles
-                st.subheader("📋 Colonnes de titres disponibles")
-                if results['title_columns']:
-                    for col in results['title_columns']:
-                        st.markdown(f"- `{col}`")
-                else:
-                    st.warning("Aucune colonne de titre trouvée")
-                
-                st.markdown("---")
-                
-                # Résultats des tests français
-                st.subheader("🇫🇷 Test de recherche de films français")
-                
-                for query, cols_results in results['french_test_results'].items():
-                    st.markdown(f"**Recherche : '{query}'**")
-                    
-                    found = False
-                    for col, result in cols_results.items():
-                        if result['count'] > 0:
-                            st.success(f"✅ Trouvé dans `{col}` : {result['example']}")
-                            found = True
-                            break
-                    
-                    if not found:
-                        st.error(f"❌ '{query}' non trouvé dans aucune colonne")
-                
-                st.markdown("---")
-                
-                # Échantillons
-                st.subheader("📊 Échantillons de titres")
-                
-                for col, samples in results['samples'].items():
-                    with st.expander(f"Colonne : {col}"):
-                        for i, sample in enumerate(samples, 1):
-                            st.markdown(f"{i}. {sample}")
-                
-                st.markdown("---")
-                
-                # Recommandations
-                st.subheader("💡 Recommandations")
-                
-                for rec in results['recommendations']:
-                    if rec['type'] == 'success':
-                        st.success(rec['message'])
-                    elif rec['type'] == 'warning':
-                        st.warning(rec['message'])
-                    elif rec['type'] == 'error':
-                        st.error(rec['message'])
-                    else:
-                        st.info(rec['message'])
-                
-                # Guide pour ajouter des titres français
-                if not results['has_french_titles']:
-                    st.markdown("---")
-                    st.markdown("### 📚 Comment ajouter des titres français")
-                    
-                    st.markdown("""
-                    **Option 1 : Table IMDb akas (recommandé)**
-                    1. Télécharger : https://datasets.imdbws.com/title.akas.tsv.gz
-                    2. Filtrer les titres avec `region = 'FR'`
-                    3. Fusionner avec la base principale
-                    
-                    **Option 2 : Dictionnaire manuel**
-                    ```python
-                    french_titles = {
-                        'tt1411238': 'Bienvenue chez les Ch\\'tis',
-                        'tt1675434': 'Intouchables',
-                        # ...
-                    }
-                    df['titre_francais'] = df['tconst'].map(french_titles)
-                    ```
-                    """)
- 
+            csv_cinemas = pd.DataFrame(CINEMAS).to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Télécharger les cinémas (CSV)",
+                data=csv_cinemas,
+                file_name="cinemas_creuse_2026.csv",
+                mime="text/csv"
+            )
+
 
 # ==========================================
 # FOOTER
@@ -2266,7 +2531,7 @@ st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; color: gray;'>
-        🎬 Cinéma Creuse | Projet Wild Code School 2026 | Paul, Hamidou & Lynda
+        🎬 Cinéma Creuse | Projet Wild Code School 2026 | Développé par Paul, Hamidou & Lynda
     </div>
     """,
     unsafe_allow_html=True

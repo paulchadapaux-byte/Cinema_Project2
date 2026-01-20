@@ -561,8 +561,9 @@ def enrich_movie_with_tmdb(movie_row):
     Returns:
         dict avec infos enrichies
     """
-    # Récupérer titre et année
-    title = movie_row.get('titre') or movie_row.get('primaryTitle')
+    # Utiliser get_display_title pour prioriser le français
+    title = get_display_title(movie_row, prefer_french=True, include_year=False)
+    
     year = None
     
     if 'startYear' in movie_row and pd.notna(movie_row['startYear']):
@@ -581,7 +582,7 @@ def enrich_movie_with_tmdb(movie_row):
         if details:
             return {
                 'tconst': movie_row.get('tconst'),
-                'title': title,
+                'title': title,  # Titre français prioritaire
                 'year': year,
                 'rating': movie_row.get('note') or movie_row.get('averageRating'),
                 'votes': movie_row.get('votes') or movie_row.get('numVotes'),
@@ -598,7 +599,7 @@ def enrich_movie_with_tmdb(movie_row):
     # Fallback si échec
     return {
         'tconst': movie_row.get('tconst'),
-        'title': title,
+        'title': title,  # Titre français prioritaire
         'year': year,
         'rating': movie_row.get('note') or movie_row.get('averageRating'),
         'votes': movie_row.get('votes') or movie_row.get('numVotes'),
