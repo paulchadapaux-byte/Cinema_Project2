@@ -27,13 +27,14 @@ from utils import (
 )
 
 # ==========================================
-# CONFIGURATION
+# CONFIGURATION STREAMLIT & GESTIONNAIRE UTILISATEUR
 # ==========================================
-
-# Initialiser le gestionnaire de profils
+# Initialise UserManager() depuis utils.py pour gérer les profils utilisateurs
+# (films aimés/non aimés, historique, préférences de genres)
 user_manager = UserManager()
 
-# Initialiser le profil Paul si vide (cache de 30 films)
+# Pré-remplissage du profil 'Paul' avec 30 films via init_paul_profile_if_needed()
+# uniquement si le profil est vide (évite duplication au rechargement)
 init_paul_profile_if_needed(user_manager)
 
 st.set_page_config(
@@ -50,15 +51,24 @@ plt.rcParams['axes.grid'] = True
 plt.rcParams['grid.alpha'] = 0.3
 
 # ==========================================
-# CHEMINS ET CHARGEMENT
+# CHEMINS PROJET & FONCTIONS DE CHARGEMENT
 # ==========================================
-
+# get_project_root() depuis utils.py détecte la racine du projet
 PROJECT_ROOT = get_project_root()
 DATA_DIR = PROJECT_ROOT / "data" 
 
 @st.cache_data
 def load_excel_data():
-    """Charge les données Excel"""
+    """
+    Charge l'ensemble des feuilles Excel du fichier Cinemas_existants_creuse.xlsx
+    
+    Returns:
+        dict: Dictionnaire contenant 11 DataFrames (démographie, prix, confiserie, etc.)
+              ou None si erreur de chargement
+    
+    Note: Utilise pd.read_excel() avec sheet_name pour charger plusieurs feuilles
+          Le cache Streamlit évite de recharger à chaque interaction
+    """
     excel_path = DATA_DIR / "processed" / 'Cinemas_existants_creuse.xlsx'
     
     if not excel_path.exists():
@@ -90,8 +100,22 @@ def load_excel_data():
 
 @st.cache_data
 def load_imdb_data():
-    """Charge le dataset IMDb avec support des titres français"""
-    imdb_path = DATA_DIR / 'PARQUETS' / 'imdb_complet_avec_cast.parquet'  # ← NOUVEAU FICHIER
+    """
+    Charge et prétraite le dataset IMDb depuis imdb_complet_avec_cast.parquet
+    
+    Pipeline de traitement :
+    1. Lecture Parquet (optimisé pour colonnes larges avec cast)
+    2. Renommage de colonnes pour compatibilité (primaryTitle→titre, etc.)
+    3. Conversions numériques avec pd.to_numeric(..., errors='coerce')
+    4. Transformation genres (string→list via split(','))
+    5. Filtres qualité : note>0, votes≥100, durée≥60
+    6. Création display_title via get_display_title() pour affichage optimisé
+    
+    Returns:
+        pd.DataFrame: Dataset nettoyé prêt pour KNN et affichage UI
+                      ou None si erreur de chargement
+    """
+    imdb_path = DATA_DIR / 'PARQUETS' / 'imdb_complet_avec_cast.parquet'
     
     if not imdb_path.exists():
         st.error(f"❌ Fichier non trouvé : {imdb_path}")
@@ -101,10 +125,11 @@ def load_imdb_data():
         df = pd.read_parquet(imdb_path)
         
         # ==========================================
-        # GESTION DES COLONNES DE TITRES
+        # MAPPING DE COLONNES POUR COMPATIBILITÉ UI
+        # Renomme primaryTitle→titre, averageRating→note, etc.
+        # Vérifie existence avant pour éviter KeyError sur datasets variés
         # ==========================================
         
-        # Renommer colonnes pour compatibilité
         column_mapping = {
             'primaryTitle': 'titre',
             'averageRating': 'note',
@@ -116,12 +141,13 @@ def load_imdb_data():
             if old_col in df.columns and new_col not in df.columns:
                 df[new_col] = df[old_col]
         
-        
         # ==========================================
-        # CONVERSIONS ET NETTOYAGE
+        # CONVERSIONS NUMÉRIQUES & TRANSFORMATION GENRES
+        # pd.to_numeric(..., errors='coerce') convertit invalides→NaN, puis fillna()
+        # genres string "Action,Drama" → list ["Action", "Drama"] via split+strip
         # ==========================================
         
-        # Conversions numériques
+        # Conversions numériques avec gestion erreurs (coerce→NaN)
         if 'note' in df.columns:
             df['note'] = pd.to_numeric(df['note'], errors='coerce').fillna(0)
         if 'votes' in df.columns:
@@ -136,7 +162,9 @@ def load_imdb_data():
             )
         
         # ==========================================
-        # FILTRES QUALITÉ
+        # FILTRES QUALITÉ (PRÉ-SÉLECTION CATALOGUE)
+        # Critères minimums : note>0, ≥100 votes, durée≥60min
+        # Réduit bruit (films non notés, courts-métrages, contenu marginal)
         # ==========================================
         
         df = df[
@@ -146,10 +174,11 @@ def load_imdb_data():
         ].copy()
         
         # ==========================================
-        # COLONNE D'AFFICHAGE OPTIMISÉE
+        # COLONNE display_title POUR PERFORMANCE UI
+        # get_display_title() depuis utils.py génère "Titre FR (Année)" ou fallback EN
+        # Pré-calcul (1 fois) évite .apply() répété dans boucles d'affichage
         # ==========================================
         
-        # Créer une colonne pour l'affichage rapide
         from utils import get_display_title
         df['display_title'] = df.apply(
             lambda row: get_display_title(row, prefer_french=True, include_year=False),
@@ -186,84 +215,235 @@ if data is None:
 
 
 # ==========================================
-# FONCTIONS DE RECOMMANDATION
+# SYSTÈME DE RECOMMANDATION KNN (PIPELINE SCIKIT-LEARN)
+# ==========================================
+# Architecture :
+# 1. build_knn_pipeline() : ColumnTransformer + NearestNeighbors (cached)
+# 2. get_recommendations_knn() : Query sur index KNN→retour top-N voisins
+# 3. get_recommendations() : Wrapper API avec gestion erreurs
 # ==========================================
 
-def get_recommendations_knn(df, movie_index, n=10):
-    """Recommandations via KNN"""
-    if 'recommandations' not in df.columns:
-        return None
+@st.cache_resource
+def build_knn_pipeline(df: pd.DataFrame):
+    """
+    Construit pipeline ML réutilisable pour recommandations par similarité cosine
     
+    Workflow pédagogique WCS :
+    1. Séparation meta (tconst, titres) vs features (genres, année, durée)
+    2. GenreMultiHot : transforme list["Action","Drama"] → sparse matrix (0/1)
+    3. ColumnTransformer : genres (passthrough) + numériques (imputation+scaler)
+    4. NearestNeighbors : indexe l'espace transformé avec metric="cosine"
+    
+    Args:
+        df: DataFrame IMDb avec colonnes [genre, startYear, durée, titre, tconst]
+    
+    Returns:
+        dict: {
+            'meta_cols': list des colonnes d'affichage,
+            'feature_cols': dict des colonnes utilisées pour similarité,
+            'preprocessor': ColumnTransformer fitted,
+            'X': matrice sparse/dense des features transformées,
+            'knn': modèle NearestNeighbors fitted
+        }
+    
+    Note: @st.cache_resource persiste le pipeline en mémoire (pas recalculé à chaque query)
+    """
+    # Imports sklearn locaux (évite pollution namespace global)
+    from sklearn.base import BaseEstimator, TransformerMixin
+    from sklearn.compose import ColumnTransformer
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.impute import SimpleImputer
+    from sklearn.neighbors import NearestNeighbors
+    from scipy import sparse
+    import numpy as np
+
+    # ==========================================
+    # ÉTAPE 1 : SÉPARATION META VS FEATURES
+    # Meta = colonnes pour affichage final (tconst, titre, display_title)
+    # Features = colonnes pour calcul similarité (genre, startYear, durée)
+    # ==========================================
+    meta_cols = [c for c in ["tconst", "titre", "display_title"] if c in df.columns]
+
+    # Vérification présence features dans DataFrame (robustesse si colonnes manquantes)
+    genre_col = "genre" if "genre" in df.columns else None
+    numeric_cols = [c for c in ["startYear", "durée"] if c in df.columns]
+
+    # ==========================================
+    # ÉTAPE 2 : TRANSFORMER CUSTOM POUR GENRES (MULTI-HOT ENCODING)
+    # Input: Series de listes ["Action", "Drama"]
+    # Output: Sparse matrix (n_films, n_genres) avec 0/1
+    # Méthode : fit() construit vocabulaire, transform() crée matrice CSR
+    # ==========================================
+    class GenreMultiHot(BaseEstimator, TransformerMixin):
+        """
+        Transformer custom pour encoder listes de genres en matrice sparse binaire
+        
+        Workflow :
+        - fit() : construit vocabulaire unique (self.vocab_) depuis toutes les listes
+        - transform() : pour chaque film, active colonnes des genres présents (1), autres 0
+        - Utilise scipy.sparse.csr_matrix pour efficacité mémoire (majoritairement 0)
+        
+        Compatible sklearn (BaseEstimator, TransformerMixin) pour intégration ColumnTransformer
+        """
+        def fit(self, X, y=None):
+            # X arrive en 2D (n_samples, 1) depuis ColumnTransformer
+            # Ravel() aplatit en 1D pour itérer sur listes de genres
+            genres_lists = [g if isinstance(g, list) else [] for g in X.ravel()]
+            vocab = set()
+            for gl in genres_lists:
+                for item in gl:
+                    if isinstance(item, str) and item.strip():
+                        vocab.add(item.strip())
+            self.vocab_ = sorted(vocab)
+            self.index_ = {g: i for i, g in enumerate(self.vocab_)}
+            return self
+
+        def transform(self, X):
+            # Même traitement : flatten vers listes de genres
+            genres_lists = [g if isinstance(g, list) else [] for g in X.ravel()]
+            n = len(genres_lists)
+            m = len(self.vocab_)
+            # Construction matrice sparse COO→CSR (efficient storage)
+            # Pour chaque (film_i, genre_j) présent : ajoute 1.0 à rows[i], cols[j]
+            rows, cols, data = [], [], []
+            for i, gl in enumerate(genres_lists):
+                for item in gl:
+                    if item in self.index_:
+                        rows.append(i)
+                        cols.append(self.index_[item])
+                        data.append(1.0)
+            return sparse.csr_matrix((data, (rows, cols)), shape=(n, m))
+
+        def get_feature_names_out(self, input_features=None):
+            return np.array([f"genre__{g}" for g in self.vocab_], dtype=object)
+
+    # ==========================================
+    # ÉTAPE 3 : CONSTRUCTION PREPROCESSOR (COLUMNTRANSFORMER)
+    # Pipeline composé :
+    # - "genres" : GenreMultiHot (pas de scaling, déjà 0/1)
+    # - "num" : SimpleImputer(median) + StandardScaler() pour durée/année
+    # remainder="drop" : ignore autres colonnes (meta déjà isolées)
+    # ==========================================
+    transformers = []
+
+    if genre_col is not None:
+        transformers.append(
+            ("genres", GenreMultiHot(), [genre_col])
+        )
+
+    if numeric_cols:
+        numeric_pipe = Pipeline(steps=[
+            ("imputer", SimpleImputer(strategy="median")),  # Remplit NaN avant scaling
+            ("scaler", StandardScaler())  # (X - mean) / std
+        ])
+        transformers.append(
+            ("num", numeric_pipe, numeric_cols)
+        )
+
+    preprocessor = ColumnTransformer(
+        transformers=transformers,
+        remainder="drop"  # Ignore colonnes non listées
+    )
+
+    # ==========================================
+    # ÉTAPE 4 : FIT_TRANSFORM SUR DATAFRAME → MATRICE FEATURES X
+    # preprocessor.fit_transform() applique tous transformers en parallèle
+    # Résultat : matrice (n_films, n_features_totales) = genres_0/1 + scaled_nums
+    # ==========================================
+    X = preprocessor.fit_transform(df)
+
+    # ==========================================
+    # ÉTAPE 5 : MODÈLE KNN NON-SUPERVISÉ (INDEXATION COSINE)
+    # NearestNeighbors(metric="cosine", algorithm="brute")
+    # - metric="cosine" : mesure similarité angulaire (1 - cosine_distance)
+    # - algorithm="brute" : calcul exact (recommandé pour sparse/binaire)
+    # knn.fit(X) indexe l'espace → ensuite knn.kneighbors(query) trouve voisins
+    # ==========================================
+    knn = NearestNeighbors(metric="cosine", algorithm="brute")
+    knn.fit(X)
+
+    return {
+        "meta_cols": meta_cols,
+        "feature_cols": {"genre": genre_col, "numeric": numeric_cols},
+        "preprocessor": preprocessor,
+        "X": X,
+        "knn": knn,
+    }
+
+
+def get_recommendations_knn(df: pd.DataFrame, movie_index: int, n: int = 10):
+    """
+    Génère N recommandations pour un film via KNN cosine
+    
+    Workflow :
+    1. Récupère engine (preprocessor + X + knn) via build_knn_pipeline(df)
+    2. Extrait vecteur du film movie_index depuis X[movie_index]
+    3. knn.kneighbors() trouve k=n+1 plus proches voisins (inclut film lui-même)
+    4. Retire le film source (indices[0]==movie_index typiquement)
+    5. Retourne DataFrame des N films les plus similaires
+    
+    Args:
+        df: DataFrame IMDb complet (aligné avec X du pipeline)
+        movie_index: Position int du film de référence dans df (iloc index)
+        n: Nombre de recommandations souhaitées (défaut 10)
+    
+    Returns:
+        pd.DataFrame: Sous-ensemble de df contenant N films similaires
+    
+    Note: Le premier voisin retourné par kneighbors() est quasi toujours le film lui-même
+          (distance cosine ≈ 0) → on le filtre systématiquement
+    """
+    engine = build_knn_pipeline(df)
+    knn = engine["knn"]
+    X = engine["X"]
+
+    # Demande n+1 voisins car premier=film source (self-match)
+    k = min(n + 1, len(df))
+    distances, indices = knn.kneighbors(X[movie_index], n_neighbors=k)
+
+    neighbors = indices.ravel().tolist()
+
+    # Filtrage explicite du film source (sécurité si présent)
+    neighbors = [i for i in neighbors if i != movie_index]
+
+    # Tronque à n résultats finaux
+    neighbors = neighbors[:n]
+
+    return df.iloc[neighbors]
+
+
+def get_recommendations(df: pd.DataFrame, movie_index: int, n: int = 10):
+    """
+    Wrapper API robuste pour recommandations KNN
+    
+    Fournit interface stable avec gestion erreurs :
+    - Succès : retourne (DataFrame recommandations, "KNN (cosine)")
+    - Échec : retourne (DataFrame vide, "KNN (indisponible)")
+    
+    Args:
+        df: DataFrame IMDb
+        movie_index: Index du film source
+        n: Nombre de recommandations
+    
+    Returns:
+        tuple: (pd.DataFrame, str) = (films recommandés, nom de la méthode)
+    
+    Note: Compatibilité avec ancien système (même signature API)
+          mais sans fallback "similarité maison" → DF vide si KNN échoue
+    """
     try:
-        movie = df.iloc[movie_index]
-        if 'recommandations' in movie and isinstance(movie['recommandations'], list):
-            reco_tconsts = movie['recommandations'][:n]
-            reco_df = df[df['tconst'].isin(reco_tconsts)].head(n)
-            return reco_df
-    except:
-        pass
-    
-    return None
-
-
-def get_recommendations_by_similarity(df, movie_index, n=10):
-    """Recommandations par similarité"""
-    movie = df.iloc[movie_index]
-    
-    movie_genres = movie.get('genre', [])
-    if not isinstance(movie_genres, list):
-        movie_genres = []
-    
-    similarities = []
-    
-    for idx, row in df.iterrows():
-        if idx == movie_index:
-            continue
-        
-        similarity_score = 0
-        
-        # Genres (60%)
-        row_genres = row.get('genre', [])
-        if not isinstance(row_genres, list):
-            row_genres = []
-        
-        if movie_genres and row_genres:
-            common = len(set(movie_genres) & set(row_genres))
-            similarity_score += (common / max(len(movie_genres), len(row_genres))) * 0.6
-        
-        # Note (30%)
-        if 'note' in movie and 'note' in row:
-            rating_diff = abs(movie.get('note', 0) - row.get('note', 0))
-            similarity_score += max(0, (1 - rating_diff/10)) * 0.3
-        
-        # Année (10%)
-        if 'startYear' in movie and 'startYear' in row:
-            if pd.notna(movie.get('startYear')) and pd.notna(row.get('startYear')):
-                year_diff = abs(movie['startYear'] - row['startYear'])
-                similarity_score += max(0, (1 - year_diff/50)) * 0.1
-        
-        similarities.append((idx, similarity_score))
-    
-    similarities.sort(key=lambda x: x[1], reverse=True)
-    top_indices = [idx for idx, _ in similarities[:n]]
-    
-    return df.iloc[top_indices]
-
-
-def get_recommendations(df, movie_index, n=10):
-    """Génère des recommandations"""
-    reco = get_recommendations_knn(df, movie_index, n)
-    
-    if reco is not None and len(reco) > 0:
-        return reco, "KNN"
-    
-    reco = get_recommendations_by_similarity(df, movie_index, n)
-    return reco, "Similarité"
-
+        reco = get_recommendations_knn(df, movie_index, n)
+        return reco, "KNN (cosine)"
+    except Exception:
+        return df.iloc[[]], "KNN (indisponible)"
 
 # ==========================================
-# SIDEBAR
+# SIDEBAR : NAVIGATION & FILTRES DYNAMIQUES
 # ==========================================
+# st.sidebar.radio() génère menu de navigation entre 7 pages
+# Filtres (genres, note, durée) s'affichent uniquement sur page "🏠 Accueil"
+# via condition if page == "🏠 Accueil"
 
 st.sidebar.title("🎬 Navigation")
 
@@ -274,7 +454,9 @@ page = st.sidebar.radio(
 
 st.sidebar.markdown("---")
 
-# Filtres pour page Accueil
+# Affichage filtres conditionnels (uniquement page Accueil)
+# Extraction genres uniques depuis colonne 'genre' (list) via set.update()
+# Filtrage DataFrame avec .apply(lambda) pour vérifier intersection genres
 if page == "🏠 Accueil":
     st.sidebar.title("🎯 Filtres")
     
@@ -305,20 +487,27 @@ else:
 st.sidebar.markdown("---")
 
 # ==========================================
-# SYSTÈME DE CONNEXION DANS LE SIDEBAR
+# SYSTÈME AUTHENTIFICATION UTILISATEUR (SIDEBAR)
+# ==========================================
+# Gère connexion/déconnexion via st.session_state['authenticated']
+# - Mode connecté : affiche nom utilisateur + bouton déconnexion
+# - Mode invité : affiche formulaire connexion (username/password)
+# Authentification via check_password() depuis utils.py
 # ==========================================
 
 st.sidebar.subheader("🔐 Connexion")
 
-# Vérifier l'état de connexion
+# Vérification état connexion depuis session Streamlit
 if st.session_state.get('authenticated', False):
-    # Utilisateur connecté
+    # ==========================================
+    # UTILISATEUR CONNECTÉ : affichage profil + logout
+    # ==========================================
     username = st.session_state.get('authenticated_user', 'Utilisateur')
     
     st.sidebar.success(f"👤 **{username}**")
     st.sidebar.caption("Profil personnalisé actif")
     
-    # Bouton de déconnexion
+    # Bouton déconnexion : reset session_state + rerun interface
     if st.sidebar.button("🚪 Se déconnecter", use_container_width=True):
         st.session_state.authenticated = False
         st.session_state.authenticated_user = None
@@ -326,7 +515,11 @@ if st.session_state.get('authenticated', False):
         st.rerun()
 
 else:
-    # Mode invité - Formulaire de connexion
+    # ==========================================
+    # MODE INVITÉ : formulaire connexion
+    # st.sidebar.form évite rerun à chaque saisie clavier
+    # Validation via check_password(username, password) depuis utils.py
+    # ==========================================
     st.sidebar.info("👤 Mode **Invité**")
     
     with st.sidebar.form("sidebar_login_form"):
@@ -362,7 +555,14 @@ st.sidebar.markdown("**🎓 Wild Code School**")
 
 
 # ==========================================
-# PAGE : ACCUEIL
+# PAGE : ACCUEIL (DOCUMENTATION TECHNIQUE)
+# ==========================================
+# Affiche architecture projet avec 5 sections :
+# 1. Présentation (info box)
+# 2. Architecture données (IMDb vs TMDb)
+# 3. Workflow (diagramme matplotlib avec FancyBboxPatch)
+# 4. Statistiques (métriques + graphiques seaborn)
+# 5. Stack technique (colonnes technologies)
 # ==========================================
 
 if page == "🏠 Accueil":
@@ -370,7 +570,8 @@ if page == "🏠 Accueil":
     st.markdown("### Architecture et méthodologie du projet")
     
     # ==========================================
-    # SECTION 1 : PRÉSENTATION
+    # SECTION 1 : PRÉSENTATION PROJET
+    # Encadré st.info() avec contexte structurel/conjoncturel
     # ==========================================
     
     st.info("""
@@ -383,7 +584,10 @@ if page == "🏠 Accueil":
     st.markdown("---")
     
     # ==========================================
-    # SECTION 2 : ARCHITECTURE DES DONNÉES
+    # SECTION 2 : ARCHITECTURE DONNÉES (DUAL SOURCE)
+    # Colonnes comparant IMDb (statique) vs TMDb (temps réel)
+    # - IMDb : load_imdb_data() → parquet local → KNN
+    # - TMDb : get_films_affiche_enrichis() → API → page Films à l'affiche
     # ==========================================
     
     st.header("📊 Architecture des données")
@@ -398,10 +602,12 @@ if page == "🏠 Accueil":
         📁 **Source** : IMDb public datasets
         
         📊 **Contenu** :
-        - 140,000+ films catalogués
-        - Notes, durées, genres
-        - Années 1950-2026
-        - Identifiants uniques
+        - 10M+ de titres catalogués (filmes, séries, etc.)
+        - 5M+ titres retenus :
+            - Distribution : France
+            - Type : Film
+            - Années 1990-2026
+        - 55K+ films disposant des informations nécessaires (acteurs, réalisateur, votes, titre français, etc.)
         
         🎯 **Usage** :
         - Base de recommandations
@@ -423,9 +629,9 @@ if page == "🏠 Accueil":
         📊 **Contenu** :
         - Films à l'affiche (now_playing)
         - Films à venir (upcoming)
-        - Affiches officielles HD
+        - Affiches officielles HD et trailers
         - Synopsis français
-        - Casting et équipe
+        - Casting et équipe complets
         
         🎯 **Usage** :
         - Page Films à l'affiche
@@ -441,13 +647,17 @@ if page == "🏠 Accueil":
             st.metric("Films TMDb", "18 (cache)")
     
     # ==========================================
-    # SECTION 3 : WORKFLOW
+    # SECTION 3 : WORKFLOW VISUEL (DIAGRAMME MATPLOTLIB)
+    # Création diagramme de flux avec matplotlib.patches :
+    # - FancyBboxPatch() pour boîtes arrondies (sources, traitement, sorties)
+    # - ax.annotate() avec arrowprops pour flèches directionnelles
+    # Flux : IMDb/TMDb → Nettoyage/Enrichissement → Algorithmes → Pages UI
     # ==========================================
     
     st.markdown("---")
     st.header("🔄 Workflow de traitement")
     
-    # Créer un diagramme de flux
+    # Construction diagramme vectoriel avec matplotlib (évite images externes)
     import matplotlib.pyplot as plt
     from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
     
@@ -466,12 +676,12 @@ if page == "🏠 Accueil":
     ax.add_patch(FancyBboxPatch((0.3, 7.5), 1.8, 1.2, boxstyle="round,pad=0.1", 
                                  fc=c_imdb, ec='black', lw=2))
     ax.text(1.2, 8.1, 'IMDb', ha='center', fontsize=14, fontweight='bold')
-    ax.text(1.2, 7.8, '140k films', ha='center', fontsize=9)
+    ax.text(1.2, 7.8, f"{len(df_movies):,} films", ha='center', fontsize=9)
     
     ax.add_patch(FancyBboxPatch((0.3, 5.8), 1.8, 1.2, boxstyle="round,pad=0.1", 
                                  fc=c_tmdb, ec='black', lw=2))
     ax.text(1.2, 6.4, 'TMDb API', ha='center', fontsize=14, fontweight='bold')
-    ax.text(1.2, 6.1, 'Temps réel', ha='center', fontsize=9)
+    ax.text(1.2, 6.1, f"{len(films)} films mis à jour en temps réel", ha='center', fontsize=9)
     
     # Traitement
     ax.add_patch(FancyBboxPatch((3, 7), 2, 1.5, boxstyle="round,pad=0.1", 
@@ -530,7 +740,10 @@ if page == "🏠 Accueil":
     plt.close()
     
     # ==========================================
-    # SECTION 4 : STATISTIQUES
+    # SECTION 4 : STATISTIQUES CATALOGUE (MÉTRIQUES + GRAPHIQUES)
+    # - st.metric() pour KPIs (total, moyenne, récents, nb genres)
+    # - matplotlib.pyplot : courbe temporelle + histogramme + barh horizontal
+    # - Palette PALETTE_CREUSE depuis utils.py pour cohérence visuelle
     # ==========================================
     
     st.markdown("---")
@@ -583,7 +796,8 @@ if page == "🏠 Accueil":
         st.pyplot(fig)
         plt.close()
     
-    # Top genres
+    # Calcul top genres via comptage dict manuel (évite dépendance collections.Counter)
+    # Tri par nombre d'occurrences décroissant → top 10
     st.subheader("🎭 Top 10 des genres")
     genre_counts = {}
     for genres in df_movies['genre']:
@@ -607,7 +821,11 @@ if page == "🏠 Accueil":
     plt.close()
     
     # ==========================================
-    # SECTION 5 : STACK TECHNIQUE
+    # SECTION 5 : STACK TECHNIQUE (3 COLONNES)
+    # Présentation technologies utilisées par catégorie :
+    # - Data & ML : Pandas, NumPy, Scikit-learn (NearestNeighbors)
+    # - Web & API : Streamlit, requests, TMDb, Folium (cartes interactives)
+    # - Storage : Parquet (colonnes optimisées), cache local, mode dégradé TMDb
     # ==========================================
     
     st.markdown("---")
@@ -651,7 +869,210 @@ elif page == "🎬 Films à l'affiche":
     st.title("🎬 Films à l'affiche en France")
     st.markdown("Découvrez tous les films en salles maintenant et ceux qui arrivent bientôt !") 
     
-    # Récupérer les films à l'affiche
+    # ==========================================
+    # EXPANDER PÉDAGOGIQUE : EXPLICATION API TMDb
+    # ==========================================
+    with st.expander("📚 Comprendre le système d'actualisation des films (API TMDb)", expanded=False, icon="🔄"):
+        col1, col2, col3 = st.columns([1, 8, 1])
+
+        with col2:
+            st.caption("🎓 Découvrez en 4 étapes comment notre système récupère les films actuellement en salles et affiche leurs informations en temps réel.")
+
+            st.markdown("**🌐 Compte TMDb → 📡 Requête API → 💾 Cache 24h → 🎬 Affichage dynamique**")
+            st.divider()
+
+            # ÉTAPE 1
+            st.subheader("🔑 Étape 1 — Créer un compte développeur TMDb")
+            st.markdown(
+                "**TMDb (The Movie Database)** est une base de données collaborative de films avec une API gratuite.\n\n"
+                "**🎯 Pourquoi TMDb plutôt qu'IMDb ?**\n"
+                "- IMDb n'a **pas d'API publique gratuite** 💰\n"
+                "- TMDb propose une API avec **3000 requêtes gratuites par jour** ✅\n"
+                "- Les données sont **mises à jour en temps réel** par la communauté\n\n"
+                "**📝 Comment créer un compte ?**\n"
+                "```python\n"
+                "# 1. Aller sur https://www.themoviedb.org/\n"
+                "# 2. Créer un compte gratuit\n"
+                "# 3. Dans Paramètres → API → Demander une clé API\n"
+                "# 4. Remplir le formulaire (usage éducatif/personnel)\n"
+                "# 5. Récupérer votre API_KEY (une longue chaîne de caractères)\n"
+                "```\n\n"
+            )
+
+            # ÉTAPE 2
+            st.subheader("📡 Étape 2 — Effectuer des requêtes API")
+            st.markdown(
+                "Une **API (Application Programming Interface)** permet à deux programmes de communiquer.\n\n"
+                "**🎬 Exemple concret : Récupérer les films à l'affiche**\n"
+                "```python\n"
+                "import requests\n\n"
+                "# URL de l'API TMDb pour les films en salle (now_playing)\n"
+                "url = 'https://api.themoviedb.org/3/movie/now_playing'\n\n"
+                "# Paramètres de la requête\n"
+                "params = {\n"
+                "    'api_key': 'VOTRE_CLE_API',      # Votre clé secrète\n"
+                "    'language': 'fr-FR',              # Langue française\n"
+                "    'region': 'FR'                    # Films en France\n"
+                "}\n\n"
+                "# Envoyer la requête GET\n"
+                "response = requests.get(url, params=params)\n\n"
+                "# Récupérer les données au format JSON\n"
+                "films = response.json()['results']  # Liste de films\n"
+                "```\n\n"
+                "**🔍 Que contient la réponse ?**\n"
+                "```python\n"
+                "# Pour chaque film, on reçoit :\n"
+                "film = {\n"
+                "    'id': 12345,                      # ID unique TMDb\n"
+                "    'title': 'Inception',             # Titre français\n"
+                "    'original_title': 'Inception',    # Titre original\n"
+                "    'release_date': '2010-07-16',     # Date de sortie\n"
+                "    'vote_average': 8.8,              # Note moyenne /10\n"
+                "    'overview': 'Dom Cobb est...',    # Synopsis\n"
+                "    'poster_path': '/abc123.jpg',     # Chemin de l'affiche\n"
+                "    'genre_ids': [28, 878, 53]        # IDs des genres\n"
+                "}\n"
+                "```\n\n"
+                "💡 **Astuce** : TMDb a une excellente **documentation interactive** sur https://developers.themoviedb.org/ "
+                "où on peut tester les requêtes directement dans le navigateur !"
+            )
+
+            # ÉTAPE 3
+            st.subheader("💾 Étape 3 — Système de cache (24 heures)")
+            st.markdown(
+                "**Problème** : Si on appelle l'API à chaque visite, on va vite atteindre la limite de 3000 requêtes/jour.\n\n"
+                "**Solution** : Mettre en **cache** les résultats pendant 24 heures.\n\n"
+                "**🔄 Comment ça marche ?**\n"
+                "```python\n"
+                "import streamlit as st\n"
+                "from datetime import datetime, timedelta\n\n"
+                "@st.cache_data(ttl=86400)  # ttl = 86400 secondes = 24 heures\n"
+                "def get_films_affiche_enrichis():\n"
+                "    '''Récupère les films à l'affiche avec cache de 24h'''\n"
+                "    \n"
+                "    # 1. Streamlit vérifie si les données sont déjà en cache\n"
+                "    # 2. Si oui ET que < 24h → retourne le cache (pas de requête API)\n"
+                "    # 3. Si non OU que > 24h → appelle l'API et met à jour le cache\n"
+                "    \n"
+                "    films = requests.get(url, params=params).json()\n"
+                "    return films\n"
+                "```\n\n"
+                "**✅ Avantages du cache**\n"
+                "- ⚡ **Rapidité** : Pas d'attente réseau (affichage instantané)\n"
+                "- 💰 **Économie de requêtes** : 100 utilisateurs = 1 seule requête API\n"
+                "- 🛡️ **Mode dégradé** : Si l'API est en panne, on affiche quand même le cache\n\n"
+                "**⚠️ Inconvénient**\n"
+                "Les données peuvent avoir jusqu'à 24h de retard. Pour les films en salle, c'est acceptable !\n\n"
+                "💡 **Fallback** : Si l'API ne répond pas ET qu'il n'y a pas de cache, on charge un fichier JSON statique "
+                "avec ~18 films populaires (mode dégradé)."
+            )
+
+            # ÉTAPE 4
+            st.subheader("🎬 Étape 4 — Enrichissement et affichage")
+            st.markdown(
+                "Les données TMDb sont **brutes**. On doit les enrichir pour l'affichage.\n\n"
+                "**🔧 Traitement dans `get_films_affiche_enrichis()`**\n"
+                "```python\n"
+                "def get_films_affiche_enrichis():\n"
+                "    # 1. Récupérer films from TMDb API\n"
+                "    films_raw = get_now_playing_france()\n"
+                "    \n"
+                "    # 2. Pour chaque film, enrichir les données\n"
+                "    films_enrichis = []\n"
+                "    for film in films_raw:\n"
+                "        enrichi = {\n"
+                "            'tmdb_id': film['id'],\n"
+                "            'titre': film['title'],\n"
+                "            'note': film['vote_average'],\n"
+                "            \n"
+                "            # Construire URL complète de l'affiche\n"
+                "            'poster_url': f\"https://image.tmdb.org/t/p/w500{film['poster_path']}\",\n"
+                "            \n"
+                "            # Récupérer détails supplémentaires (réalisateur, acteurs)\n"
+                "            'realisateur': get_movie_details_from_tmdb(film['id'])['director'],\n"
+                "            'acteurs': get_movie_details_from_tmdb(film['id'])['cast'][:5],\n"
+                "            \n"
+                "            # Convertir genre_ids en noms\n"
+                "            'genres': [GENRE_MAP[gid] for gid in film['genre_ids']]\n"
+                "        }\n"
+                "        films_enrichis.append(enrichi)\n"
+                "    \n"
+                "    return films_enrichis\n"
+                "```\n\n"
+                "**🎨 Affichage dans Streamlit**\n"
+                "```python\n"
+                "for film in films_enrichis:\n"
+                "    col1, col2 = st.columns([1, 3])\n"
+                "    \n"
+                "    with col1:\n"
+                "        st.image(film['poster_url'])  # Affiche l'affiche\n"
+                "    \n"
+                "    with col2:\n"
+                "        st.markdown(f\"**{film['titre']}**\")\n"
+                "        st.write(f\"⭐ {film['note']}/10\")\n"
+                "        st.write(f\"🎬 {film['realisateur']}\")\n"
+                "        st.write(f\"🎭 {', '.join(film['genres'])}\")\n"
+                "```"
+            )
+
+            # BONUS
+            st.markdown("---")
+            st.markdown("**💡 Fonctionnalités avancées de notre système**")
+            st.markdown(
+                "**🎥 Extraction des trailers YouTube**\n"
+                "```python\n"
+                "def get_trailers_from_films(films, max_trailers=5):\n"
+                "    '''Récupère les trailers YouTube depuis l'API TMDb'''\n"
+                "    trailers = {}\n"
+                "    \n"
+                "    for film in films[:max_trailers]:  # Limiter pour rate limit\n"
+                "        # Appel endpoint /movie/{id}/videos\n"
+                "        videos = requests.get(f\"{BASE_URL}/movie/{film['tmdb_id']}/videos\").json()\n"
+                "        \n"
+                "        # Chercher la bande-annonce officielle YouTube\n"
+                "        for video in videos['results']:\n"
+                "            if video['type'] == 'Trailer' and video['site'] == 'YouTube':\n"
+                "                trailers[film['tmdb_id']] = {\n"
+                "                    'video_id': video['key'],      # ID YouTube\n"
+                "                    'titre': film['titre'],\n"
+                "                    'realisateur': film['realisateur']\n"
+                "                }\n"
+                "                break\n"
+                "    \n"
+                "    return trailers\n"
+                "```\n\n"
+                "**🔄 Séparation par statut (en salle vs à venir)**\n"
+                "```python\n"
+                "def separer_films_par_statut(films):\n"
+                "    '''Sépare selon release_date vs date actuelle'''\n"
+                "    today = datetime.now().date()\n"
+                "    \n"
+                "    films_en_salles = []\n"
+                "    films_bientot = []\n"
+                "    \n"
+                "    for film in films:\n"
+                "        release = datetime.strptime(film['date_sortie'], '%Y-%m-%d').date()\n"
+                "        \n"
+                "        if release <= today:\n"
+                "            films_en_salles.append(film)   # Déjà sorti\n"
+                "        else:\n"
+                "            films_bientot.append(film)      # Pas encore sorti\n"
+                "    \n"
+                "    return films_en_salles, films_bientot\n"
+                "```\n\n"
+                "**🎯 Matching avec notre base IMDb**\n"
+                "Pour certains films, on peut croiser les données TMDb avec notre base IMDb locale "
+                "via le titre + année pour récupérer des infos supplémentaires (casting complet, notes détaillées)."
+            )
+
+        
+    # ==========================================
+    # RÉCUPÉRATION FILMS TMDb (API + CACHE FALLBACK)
+    # get_films_affiche_enrichis() depuis utils.py :
+    # - Appel TMDb API (now_playing + upcoming)
+    # - Enrichissement via get_movie_details_from_tmdb()
+    # - Fallback cache si API indisponible
+    # ==========================================
     with st.spinner("🎬 Récupération des films..."):
         films_affiche = get_films_affiche_enrichis()
     
@@ -659,27 +1080,31 @@ elif page == "🎬 Films à l'affiche":
         st.warning("⚠️ Impossible de récupérer les films à l'affiche pour le moment.")
         st.stop()
     
-    # Récupérer les trailers disponibles pour les films à l'affiche
+    # ==========================================
+    # EXTRACTION TRAILERS YOUTUBE
+    # get_trailers_from_films() depuis utils.py :
+    # - Cherche video_id YouTube pour chaque film
+    # - Limite à max_trailers pour performance (TMDb rate limit)
+    # - Retourne dict {tmdb_id: {video_id, titre, realisateur, ...}}
+    # ==========================================
     with st.spinner("🎥 Recherche des trailers disponibles..."):
         trailers_disponibles = get_trailers_from_films(films_affiche, max_trailers=5)
     
-    # Afficher un trailer si disponible
+    # Affichage trailer du film le plus populaire (si disponible)
     if trailers_disponibles:
         st.markdown("### 🎥 Bande-annonce du moment")
         
-        # Sélectionner un trailer (le premier avec la meilleure popularité)
-        # On pourrait aussi faire random.choice(list(trailers_disponibles.values()))
+        # Tri par popularité (field TMDb) → premier=plus populaire
         films_avec_trailers = [
             (key, info) for key, info in trailers_disponibles.items()
         ]
         
-        # Trier par popularité du film
         films_avec_trailers.sort(
             key=lambda x: x[1]['film_data'].get('popularite', 0),
             reverse=True
         )
         
-        # Prendre le film le plus populaire avec un trailer
+        # Affichage via display_youtube_video() (iframe embed personnalisé)
         if films_avec_trailers:
             selected_key, trailer_info = films_avec_trailers[0]
             
@@ -690,7 +1115,7 @@ elif page == "🎬 Films à l'affiche":
                 max_width=900
             )
             
-            # Afficher des infos sur le film
+            # Métriques film (note, année, durée)
             film_data = trailer_info['film_data']
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -705,20 +1130,28 @@ elif page == "🎬 Films à l'affiche":
         
         st.markdown("---")
     
-    # Séparer les films par statut
+    # ==========================================
+    # SÉPARATION FILMS PAR STATUT (RELEASE_DATE)
+    # separer_films_par_statut() depuis utils.py compare release_date vs datetime.now()
+    # Retourne (films_en_salles, films_bientot) selon statut TMDb
+    # ==========================================
     from utils import separer_films_par_statut
     films_en_salles, films_bientot = separer_films_par_statut(films_affiche)
     
     st.success(f"✅ {len(films_en_salles)} films en salles • 🔜 {len(films_bientot)} films à venir")
     
-    # Tabs pour séparer les sections
+    # st.tabs() sépare UX (évite scroll infini)
     tab1, tab2 = st.tabs([
         f"🎬 Déjà en salles ({len(films_en_salles)})",
         f"🔜 Bientôt disponibles ({len(films_bientot)})"
     ])
     
     # ==========================================
-    # TAB 1 : FILMS DÉJÀ EN SALLES
+    # TAB 1 : FILMS EN SALLES (FILTRES + PAGINATION + GRID)
+    # - Filtres sidebar : genres (multiselect), note (slider)
+    # - Tri : popularité, note, titre (A-Z/Z-A)
+    # - Pagination manuelle via st.session_state.page_num_salles
+    # - Affichage grille 4 colonnes avec posters + expander détails
     # ==========================================
     
     with tab1:
@@ -851,7 +1284,7 @@ elif page == "🎬 Films à l'affiche":
                         
                         with st.expander("📄 Voir les détails"):
                             st.markdown("**📝 Synopsis**")
-                            st.write(film['synopsis'])
+                            st.markdown(film['synopsis'])
                             
                             st.markdown("---")
                             
@@ -923,7 +1356,7 @@ elif page == "🎬 Films à l'affiche":
                     
                     with st.expander("📄 Voir les détails"):
                         st.markdown("**📝 Synopsis**")
-                        st.write(film['synopsis'])
+                        st.markdown(film['synopsis'])
                         
                         st.markdown("---")
                         
@@ -948,15 +1381,134 @@ elif page == "🎬 Films à l'affiche":
 
 
 # ==========================================
+# PAGE : RECOMMANDATIONS (2 MODES)
+# ==========================================
+# Mode 1 (Tab1) : Recommandations personnalisées basées sur profil utilisateur
+#   - get_personalized_recommendations() depuis utils.py
+#   - Analyse films aimés/genres préférés via UserManager
+#   - Score pondéré (similarité KNN + préférences genres)
+# Mode 2 (Tab2) : Recherche par titre/acteur
+#   - find_movies_with_correction() pour recherche fuzzy
+#   - get_recommendations() pour KNN sur film sélectionné
+# ==========================================
 
 elif page == "💡 Recommandations":
     st.title("🎬 Système de Recommandation de Films")
+    
+    # ==========================================
+    # EXPANDER PÉDAGOGIQUE : EXPLICATION KNN EN 6 ÉTAPES
+    # Documentation complète méthodologie (optionnel, collapsed par défaut)
+    # Couvre : séparation données, preprocessing, cosine, KNN, limites
+    # ==========================================
+    with st.expander("📚 Comprendre le système de recommandation (KNN)", expanded=False, icon="❔"):
+        col1, col2, col3 = st.columns([1, 8, 1])
+
+        with col2:
+            st.caption("🎓 En 6 étapes simples, découvrez comment notre système trouve 10 films similaires à celui que vous aimez.")
+
+            st.markdown("**📊 Données → 🧹 Nettoyage → 📏 Mesure → 🔍 Recherche → ✨ Top 10 → 💡 Limites**")
+            st.divider()
+
+            # ÉTAPE 1
+            st.subheader("📦 Étape 1 — Trier nos informations")
+            st.markdown(
+                "Imaginez une fiche de film. Elle contient deux types d'informations :\n\n"
+                "**📝 Informations pour l'affichage** (ce qu'on montre à l'utilisateur)\n"
+                "- Le titre du film : `\"Inception\"`\n"
+                "- L'année de sortie : `2010`\n"
+                "- L'identifiant IMDb : `\"tt1375666\"`\n\n"
+                "**🎯 Informations pour la comparaison** (ce qu'on utilise pour calculer)\n"
+                "- Les genres : `Action=1, Sci-Fi=1, Romance=0, Comédie=0...`\n"
+                "- La durée : `148 minutes`\n"
+                "- L'année : `2010`\n\n"
+                "💡 **Pourquoi cette séparation ?**\n"
+                "On garde le titre pour l'afficher à l'utilisateur, mais on ne peut pas \"comparer\" deux titres entre eux. "
+                "Par contre, on peut comparer des genres (0/1) et des durées (nombres) !"
+            )
+
+            # ÉTAPE 2
+            st.subheader("🧹 Étape 2 — Préparer les données (preprocessing)")
+            st.markdown(
+                "Les ordinateurs ne comprennent que les chiffres. Il faut donc transformer nos données :\n\n"
+                "**🎭 Les genres → Transformer en 0 et 1**\n"
+                "```python\n"
+                "# Au lieu de : genres = ['Action', 'Sci-Fi']\n"
+                "# On obtient : Action=1, Sci-Fi=1, Comédie=0, Romance=0...\n"
+                "```\n"
+                "On utilise notre classe custom `GenreMultiHot` qui fait ce travail.\n\n"
+                "**📏 Les nombres → Mettre à la même échelle**\n"
+                "```python\n"
+                "# Problème : durée=148 min, année=2010 → échelles très différentes !\n"
+                "# Solution : StandardScaler() met tout entre -2 et +2 environ\n"
+                "```\n\n"
+                "💡 **Pourquoi standardiser ?**\n"
+                "Si on ne le fait pas, l'année (valeurs ~2000) va \"écraser\" la durée (valeurs ~100-200). "
+                "Le `StandardScaler()` égalise l'importance de chaque colonne en calculant : `(valeur - moyenne) / écart-type`"
+            )
+
+            # ÉTAPE 3
+            st.subheader("📏 Étape 3 — Mesurer la similarité (distance cosine)")
+            st.markdown(
+                "Maintenant, comment comparer deux films ?\n\n"
+                "**🎯 Chaque film = un point dans l'espace**\n"
+                "```python\n"
+                "Film A : [Action=1, Sci-Fi=1, Durée=2.1, Année=0.5]\n"
+                "Film B : [Action=1, Sci-Fi=1, Durée=2.0, Année=0.6]\n"
+                "Film C : [Comédie=1, Romance=1, Durée=-1.2, Année=-0.8]\n"
+                "```\n\n"
+                "**📐 La distance cosine mesure l'angle**\n"
+                "- Films A et B pointent dans la **même direction** → angle petit → **très similaires** ✅\n"
+                "- Films A et C pointent dans des **directions opposées** → angle grand → **très différents** ❌\n\n"
+                "💡 **Analogie simple**\n"
+                "Imaginez deux flèches dans l'espace. Si elles pointent dans la même direction (même genres, même durée), "
+                "l'angle entre elles est petit = films similaires !"
+            )
+
+            # ÉTAPE 4
+            st.subheader("🔍 Étape 4 — Trouver les voisins (algorithme KNN)")
+            st.markdown(
+                "**KNN = K-Nearest Neighbors = Les K Plus Proches Voisins**\n\n"
+                "C'est un algorithme de **Machine Learning non supervisé** (on ne lui donne pas de \"bonne réponse\", "
+                "il cherche tout seul les films les plus proches).\n\n"
+                "**Comment ça marche en pratique :**\n"
+                "```python\n"
+                "# 1. On crée le modèle avec metric='cosine' (notre mesure de distance)\n"
+                "from sklearn.neighbors import NearestNeighbors\n"
+                "knn = NearestNeighbors(metric='cosine', algorithm='brute')\n\n"
+                "# 2. On lui donne TOUS nos films pour qu'il les \"mémorise\"\n"
+                "knn.fit(X)  # X = notre tableau avec tous les films préparés\n\n"
+                "# 3. On cherche les 11 plus proches voisins d'un film\n"
+                "distances, indices = knn.kneighbors(X[42], n_neighbors=11)\n"
+                "# Pourquoi 11 ? Car le premier voisin est le film lui-même !\n"
+                "```\n\n"
+                "**⚠️ Petit piège à éviter**\n"
+                "Le film Inception cherche ses voisins → le premier voisin trouvé est... Inception lui-même ! (distance = 0)\n"
+                "→ On retire donc le premier résultat et on garde les 10 suivants."
+            )
+
+            # ÉTAPE 5
+            st.subheader("✨ Étape 5 — Afficher les 10 recommandations")
+            st.markdown(
+                "Une fois qu'on a les indices des 10 films les plus proches, on les affiche :\n\n"
+                "```python\n"
+                "# indices = [456, 789, 123, 890, ...]  → positions dans notre DataFrame\n"
+                "recommended_films = df_movies.iloc[indices]  # On récupère les lignes\n\n"
+                "# On affiche : titre, année, genres, note...\n"
+                "for film in recommended_films:\n"
+                "    print(film['titre'], film['note'], film['genre'])\n"
+                "```\n\n"
+                "**🎨 Bonus : On peut réordonner l'affichage**\n"
+                "Les 10 films sont déjà triés par similarité, mais on peut aussi les trier par note IMDb "
+                "pour mettre les meilleurs en premier (sans changer la recherche de similarité)."
+            )
+
+        
     st.markdown("### Découvrez des films qui correspondent à vos goûts")
     
-    # Récupérer l'utilisateur actuel (connecté ou invité)
+    # Extraction utilisateur actuel depuis st.session_state (géré par système auth)
     current_user = st.session_state.get('authenticated_user', 'invite')
     
-    # Afficher l'utilisateur
+    # Affichage contexte utilisateur
     if current_user != 'invite':
         st.info(f"👤 Profil de **{current_user}**")
     else:
@@ -964,12 +1516,15 @@ elif page == "💡 Recommandations":
     
     st.markdown("---")
     
-    # Charger les films aimés/pas aimés de l'utilisateur
+    # Récupération préférences utilisateur via UserManager (utils.py)
+    # liked_films/disliked_films : listes de tconst pour filtrage et scoring
     liked_films = user_manager.get_liked_films(current_user)
     disliked_films = user_manager.get_disliked_films(current_user)
     
     # ==========================================
-    # TABS : 2 MODES DE RECOMMANDATION
+    # TABS : 2 MODES DE RECOMMANDATION DISTINCTS
+    # Tab1 : Recommandations personnalisées (profil utilisateur)
+    # Tab2 : Recherche manuelle (titre/acteur) + KNN sur sélection
     # ==========================================
     
     tab1, tab2 = st.tabs([
@@ -978,7 +1533,13 @@ elif page == "💡 Recommandations":
     ])
     
     # ==========================================
-    # TAB 1 : RECOMMANDATIONS BASÉES SUR LE PROFIL
+    # TAB 1 : RECOMMANDATIONS PERSONNALISÉES
+    # Workflow :
+    # 1. Vérification profil (liked_films non vide)
+    # 2. get_personalized_recommendations(df, liked, disliked, top_n)
+    #    → Analyse genres préférés + KNN multiple + scoring pondéré
+    # 3. Filtrage interactif (sliders score/nombre)
+    # 4. Enrichissement TMDb (affiches) + affichage grille
     # ==========================================
     
     with tab1:
@@ -997,10 +1558,14 @@ elif page == "💡 Recommandations":
         else:
             st.markdown(f"*Basées sur vos **{len(liked_films)} films aimés** et vos genres préférés*")
             
-            # Importer la fonction de recommandations
+            # get_personalized_recommendations() depuis utils.py :
+            # - Calcule genres préférés (fréquence dans liked_films)
+            # - Pour chaque liked, trouve N voisins KNN
+            # - Score composite : similarité KNN × poids genre × pénalité disliked
+            # - Retourne DataFrame trié par score_recommandation (0-100)
             from utils import get_personalized_recommendations
             
-            # Générer les recommandations
+            # Génération recommandations (peut prendre quelques secondes si profil large)
             with st.spinner("🎬 Génération de vos recommandations personnalisées..."):
                 recommended_films = get_personalized_recommendations(
                     df_movies, 
@@ -1012,14 +1577,14 @@ elif page == "💡 Recommandations":
             if len(recommended_films) > 0:
                 st.success(f"✨ **{len(recommended_films)} films recommandés** pour vous !")
                 
-                # Options d'affichage
+                # Sliders interactifs pour filtrage temps réel (sans rerun complet)
                 col_opt1, col_opt2 = st.columns(2)
                 with col_opt1:
                     nb_to_show = st.slider("Nombre de films à afficher", 5, 20, 10, step=5, key="slider_nb_films")
                 with col_opt2:
                     min_score = st.slider("Score minimum (%)", 0, 100, 50, step=10, key="slider_score")
                 
-                # Filtrer par score
+                # Filtrage DataFrame par score_recommandation (colonne ajoutée par get_personalized_recommendations)
                 films_filtered = recommended_films[
                     recommended_films.get('score_recommandation', 0) >= min_score
                 ]
@@ -1029,10 +1594,16 @@ elif page == "💡 Recommandations":
                 if len(films_filtered) == 0:
                     st.warning(f"Aucun film avec un score >= {min_score}%. Réduisez le score minimum.")
                 else:
-                    # Afficher les recommandations avec affiches
+                    # ==========================================
+                    # AFFICHAGE GRILLE FILMS RECOMMANDÉS
+                    # Pour chaque film :
+                    # - enrich_movie_with_tmdb() récupère poster via TMDb ID matching
+                    # - Layout 3 colonnes : poster + infos + actions (like/dislike)
+                    # - st.progress() pour visualisation score_recommandation
+                    # ==========================================
                     for idx, film in films_filtered.head(nb_to_show).iterrows():
                         
-                        # Enrichir le film avec TMDb pour l'affiche
+                        # Enrichissement TMDb pour affiche (fallback placeholder si échec)
                         from utils import enrich_movie_with_tmdb, get_display_title
                         film_enrichi = enrich_movie_with_tmdb(film)
                         
@@ -1066,7 +1637,7 @@ elif page == "💡 Recommandations":
                             with st.expander("📄 Voir le synopsis"):
                                 st.markdown("**📝 Synopsis**")
                                 synopsis = film_enrichi.get('synopsis', 'Synopsis non disponible.')
-                                st.write(synopsis)
+                                st.markdown(synopsis)
                                 
                                 st.markdown("---")
                                 
@@ -1291,7 +1862,7 @@ elif page == "💡 Recommandations":
                                                 # AJOUTER EXPANDER POUR SYNOPSIS
                                                 with st.expander("📄 Détails"):
                                                     st.markdown("**📝 Synopsis**")
-                                                    st.write(enriched.get('synopsis', 'Synopsis non disponible'))
+                                                    st.markdown(enriched.get('synopsis', 'Synopsis non disponible'))
                                                     
                                                     if enriched.get('director') and enriched['director'] != 'Inconnu':
                                                         st.caption(f"🎬 {enriched['director']}")
@@ -1362,7 +1933,7 @@ elif page == "💡 Recommandations":
                                                 # AJOUTER EXPANDER POUR SYNOPSIS
                                                 with st.expander("📄 Détails"):
                                                     st.markdown("**📝 Synopsis**")
-                                                    st.write(enriched.get('synopsis', 'Synopsis non disponible'))
+                                                    st.markdown(enriched.get('synopsis', 'Synopsis non disponible'))
                                                     
                                                     if enriched.get('director') and enriched['director'] != 'Inconnu':
                                                         st.caption(f"🎬 {enriched['director']}")
@@ -1383,6 +1954,193 @@ elif page == "💡 Recommandations":
         
 elif page == "❤️ Mes Films Favoris":
     st.title("❤️ Mes Films Favoris")
+    
+    # ==========================================
+    # EXPANDER PÉDAGOGIQUE : EXPLICATION SYSTÈME PROFILS
+    # ==========================================
+    with st.expander("📚 Comprendre le système de profils utilisateurs", expanded=False, icon="👤"):
+        col1, col2, col3 = st.columns([1, 8, 1])
+
+        with col2:
+            st.caption("🎓 Découvrez comment le système sauvegarde vos préférences et améliore vos recommandations.")
+
+            st.markdown("**👤 Profil → 💾 Stockage → 👍👎 Likes/Dislikes → 🎯 Recommandations**")
+            st.divider()
+
+            # ÉTAPE 1
+            st.subheader("👤 Étape 1 — Le système UserManager")
+            st.markdown(
+                "**UserManager** est une classe Python qui gère tous les profils utilisateurs.\n\n"
+                "**🎯 Qu'est-ce qu'un profil ?**\n"
+                "```python\n"
+                "# Structure d'un profil utilisateur\n"
+                "profil = {\n"
+                "    'username': 'paul',\n"
+                "    'liked_films': ['tt1375666', 'tt0816692', ...],   # Liste des tconst aimés\n"
+                "    'disliked_films': ['tt0111161', ...],              # Liste des tconst pas aimés\n"
+                "    'favorite_genres': ['Action', 'Sci-Fi', 'Drama']  # Genres préférés (déduits)\n"
+                "}\n"
+                "```\n\n"
+                "**🔧 Classe UserManager**\n"
+                "```python\n"
+                "class UserManager:\n"
+                "    def __init__(self):\n"
+                "        self.profiles = {}  # Dict stockant tous les profils\n"
+                "    \n"
+                "    def add_liked_film(self, username, tconst):\n"
+                "        '''Ajoute un film à la liste des films aimés'''\n"
+                "        if username not in self.profiles:\n"
+                "            self.profiles[username] = {'liked_films': [], 'disliked_films': []}\n"
+                "        self.profiles[username]['liked_films'].append(tconst)\n"
+                "    \n"
+                "    def get_liked_films(self, username):\n"
+                "        '''Récupère tous les films aimés d'un utilisateur'''\n"
+                "        return self.profiles.get(username, {}).get('liked_films', [])\n"
+                "```\n\n"
+                "💡 **Où sont stockés les profils ?**\n"
+                "Les profils sont stockés en **mémoire RAM** pendant la session. Quand tu fermes l'application, ils disparaissent. "
+                "Pour une vraie app en production, on utiliserait une base de données (SQLite, PostgreSQL)."
+            )
+
+            # ÉTAPE 2
+            st.subheader("💾 Étape 2 — Système de likes/dislikes")
+            st.markdown(
+                "Chaque fois que tu cliques sur 👍 ou 👎, voici ce qui se passe :\n\n"
+                "**🔄 Workflow complet**\n"
+                "```python\n"
+                "# 1. L'utilisateur clique sur 👍 pour 'Inception'\n"
+                "if st.button('👍', key='like_tt1375666'):\n"
+                "    \n"
+                "    # 2. On récupère le tconst du film\n"
+                "    tconst = 'tt1375666'\n"
+                "    \n"
+                "    # 3. On l'ajoute au profil via UserManager\n"
+                "    user_manager.add_liked_film(current_user, tconst)\n"
+                "    \n"
+                "    # 4. On retire des dislikes si présent (switch)\n"
+                "    user_manager.remove_disliked_film(current_user, tconst)\n"
+                "    \n"
+                "    # 5. Streamlit recharge la page\n"
+                "    st.rerun()\n"
+                "```\n\n"
+                "**🎭 Déduction des genres préférés**\n"
+                "```python\n"
+                "def calculate_favorite_genres(liked_films, df_movies):\n"
+                "    '''Calcule les genres les plus présents dans les films aimés'''\n"
+                "    \n"
+                "    genre_counts = {}\n"
+                "    \n"
+                "    for tconst in liked_films:\n"
+                "        # Récupérer le film dans le DataFrame\n"
+                "        film = df_movies[df_movies['tconst'] == tconst].iloc[0]\n"
+                "        \n"
+                "        # Compter chaque genre\n"
+                "        for genre in film['genre']:  # ['Action', 'Sci-Fi']\n"
+                "            genre_counts[genre] = genre_counts.get(genre, 0) + 1\n"
+                "    \n"
+                "    # Trier par fréquence décroissante\n"
+                "    favorite_genres = sorted(genre_counts.items(), \n"
+                "                            key=lambda x: x[1], \n"
+                "                            reverse=True)[:5]  # Top 5\n"
+                "    \n"
+                "    return [genre for genre, count in favorite_genres]\n"
+                "```\n\n"
+                "💡 **Exemple concret**\n"
+                "Si tu aimes : *Inception*, *Interstellar*, *The Dark Knight*\n"
+                "→ Genres détectés : Action (3), Sci-Fi (2), Thriller (2)\n"
+                "→ Tes genres préférés : Action, Sci-Fi, Thriller"
+            )
+
+            # ÉTAPE 3
+            st.subheader("🎯 Étape 3 — Impact sur les recommandations")
+            st.markdown(
+                "Ton profil est utilisé dans `get_personalized_recommendations()` :\n\n"
+                "**📊 Score de recommandation pondéré**\n"
+                "```python\n"
+                "def get_personalized_recommendations(df, liked_films, disliked_films, top_n=20):\n"
+                "    '''Génère recommandations basées sur profil utilisateur'''\n"
+                "    \n"
+                "    # 1. Calculer genres préférés depuis liked_films\n"
+                "    favorite_genres = calculate_favorite_genres(liked_films, df)\n"
+                "    \n"
+                "    recommendations = []\n"
+                "    \n"
+                "    # 2. Pour chaque film aimé, trouver voisins KNN\n"
+                "    for liked_tconst in liked_films:\n"
+                "        idx = df[df['tconst'] == liked_tconst].index[0]\n"
+                "        neighbors = get_recommendations_knn(df, idx, n=10)\n"
+                "        \n"
+                "        # 3. Pour chaque voisin, calculer score\n"
+                "        for _, film in neighbors.iterrows():\n"
+                "            \n"
+                "            # Score de base (similarité KNN) = 50%\n"
+                "            score = 50\n"
+                "            \n"
+                "            # Bonus si genres correspondent (+30%)\n"
+                "            if any(g in favorite_genres for g in film['genre']):\n"
+                "                score += 30\n"
+                "            \n"
+                "            # Bonus si note élevée (+20%)\n"
+                "            if film['note'] >= 7.5:\n"
+                "                score += 20\n"
+                "            \n"
+                "            # Pénalité si déjà dans disliked (-100 = exclusion)\n"
+                "            if film['tconst'] in disliked_films:\n"
+                "                score = 0\n"
+                "            \n"
+                "            recommendations.append({\n"
+                "                'film': film,\n"
+                "                'score_recommandation': min(score, 100)  # Plafonné à 100\n"
+                "            })\n"
+                "    \n"
+                "    # 4. Dédupliquer et trier par score\n"
+                "    recommendations = sorted(recommendations, \n"
+                "                            key=lambda x: x['score_recommandation'], \n"
+                "                            reverse=True)[:top_n]\n"
+                "    \n"
+                "    return recommendations\n"
+                "```\n\n"
+                "✅ **Résultat**\n"
+                "Plus tu likes/dislikes de films, plus le système comprend tes goûts !"
+            )
+
+            # RÉCAP
+            st.markdown("---")
+            st.markdown("**📋 Récapitulatif : Comment tout se connecte**")
+            st.markdown(
+                "```\n"
+                "1. 👤 Tu te connectes (ou mode Invité)\n"
+                "   ↓\n"
+                "2. 🔍 Tu recherches un film (find_movies_with_correction)\n"
+                "   ↓\n"
+                "3. 👍 Tu cliques sur J'aime\n"
+                "   ├─ UserManager.add_liked_film(user, tconst)\n"
+                "   └─ Profil mis à jour en mémoire\n"
+                "   ↓\n"
+                "4. 🎭 Système calcule tes genres préférés\n"
+                "   ├─ Analyse tous les films aimés\n"
+                "   └─ Compte fréquence de chaque genre\n"
+                "   ↓\n"
+                "5. 💡 Tu vas sur page Recommandations\n"
+                "   ├─ get_personalized_recommendations(df, liked, disliked)\n"
+                "   ├─ Pour chaque film aimé → KNN trouve voisins\n"
+                "   ├─ Score = similarité + bonus genres + bonus note\n"
+                "   └─ Exclusion des films dislikés\n"
+                "   ↓\n"
+                "6. ✨ Affichage top 20 recommandations triées par score\n"
+                "```"
+            )
+
+            st.info(
+                "💡 **Astuce**\n\n"
+                "Pour de meilleures recommandations :\n"
+                "- ✅ Like au moins **5-10 films** variés\n"
+                "- ✅ Dislike les films que tu n'as vraiment **pas aimés**\n"
+                "- ✅ Plus tu interagis, plus le système s'améliore !\n\n"
+                "Le profil 'Paul' a déjà 30 films pré-remplis pour démonstration."
+            )
+
+        
     
     # Vérifier si l'utilisateur est connecté
     if not st.session_state.get('authenticated', False):
@@ -1636,6 +2394,146 @@ elif page == "🗺️ Cinémas Creuse":
     st.markdown("### Trouvez le cinéma le plus proche avec les films à l'affiche")
     
     # ==========================================
+    # EXPANDER PÉDAGOGIQUE : EXPLICATION CARTOGRAPHIE
+    # ==========================================
+    with st.expander("📚 Comprendre le système de cartographie interactive", expanded=False, icon="🗺️"):
+        col1, col2, col3 = st.columns([1, 8, 1])
+
+        with col2:
+            st.caption("🎓 Découvrez comment afficher une carte interactive avec Folium et calculer les distances.")
+
+            st.markdown("**📍 Position → 🗺️ Carte Folium → 📏 Calcul distances → 🎬 Affichage cinémas**")
+            st.divider()
+
+            # ÉTAPE 1
+            st.subheader("📍 Étape 1 — Géolocalisation de l'utilisateur")
+            st.markdown(
+                "Pour afficher les cinémas les plus proches, on a besoin de ta position.\n\n"
+                "**🎯 Deux méthodes de localisation**\n\n"
+                "**Méthode 1 : Sélection ville prédéfinie**\n"
+                "```python\n"
+                "# Dictionnaire des villes principales de la Creuse\n"
+                "VILLES_CREUSE = {\n"
+                "    'Guéret': [46.1703, 1.8717],          # [latitude, longitude]\n"
+                "    'La Souterraine': [46.2380, 1.4887],\n"
+                "    'Aubusson': [45.9564, 2.1688],\n"
+                "    'Boussac': [46.3508, 2.2142],\n"
+                "    # ... autres villes\n"
+                "}\n\n"
+                "# Dans Streamlit\n"
+                "selected_city = st.selectbox('Votre ville', list(VILLES_CREUSE.keys()))\n"
+                "user_lat, user_lon = VILLES_CREUSE[selected_city]  # Récupère coordonnées\n"
+                "```\n\n"
+                "**Méthode 2 : Saisie manuelle coordonnées**\n"
+                "```python\n"
+                "# Si l'utilisateur choisit 'Autre ville (saisie manuelle)'\n"
+                "if selected_city == 'Autre ville (saisie manuelle)':\n"
+                "    user_lat = st.number_input('Latitude', value=46.17, format='%.4f')\n"
+                "    user_lon = st.number_input('Longitude', value=1.87, format='%.4f')\n"
+                "```\n\n"
+                "💡 **Comment trouver ses coordonnées GPS ?**\n"
+                "→ Google Maps : clic droit sur un point → coordonnées s'affichent\n"
+                "→ Format : Latitude (Nord-Sud), Longitude (Est-Ouest)"
+            )
+
+            # ÉTAPE 2
+            st.subheader("🗺️ Étape 2 — Créer une carte avec Folium")
+            st.markdown(
+                "**Folium** est une bibliothèque Python pour créer des cartes interactives (basée sur Leaflet.js).\n\n"
+                "**🎨 Création de la carte**\n"
+                "```python\n"
+                "import folium\n"
+                "from streamlit_folium import st_folium\n\n"
+                "def create_map(center_lat, center_lon, cinemas, user_location=None):\n"
+                "    '''Crée une carte Folium interactive'''\n"
+                "    \n"
+                "    # 1. Créer la carte centrée sur un point\n"
+                "    m = folium.Map(\n"
+                "        location=[center_lat, center_lon],  # Centre de la carte\n"
+                "        zoom_start=10,                       # Niveau de zoom (1=monde, 18=rue)\n"
+                "        tiles='OpenStreetMap'                # Style de carte (OSM gratuit)\n"
+                "    )\n"
+                "    \n"
+                "    # 2. Ajouter marqueur utilisateur (bleu)\n"
+                "    if user_location:\n"
+                "        folium.Marker(\n"
+                "            location=user_location,\n"
+                "            popup='Votre position',\n"
+                "            icon=folium.Icon(color='blue', icon='user')  # Icône bleue\n"
+                "        ).add_to(m)\n"
+                "    \n"
+                "    # 3. Ajouter marqueurs cinémas (rouge)\n"
+                "    for cinema in cinemas:\n"
+                "        folium.Marker(\n"
+                "            location=[cinema['lat'], cinema['lon']],\n"
+                "            popup=f\"{cinema['nom']} - {cinema['ville']}\",\n"
+                "            icon=folium.Icon(color='red', icon='film')  # Icône rouge\n"
+                "        ).add_to(m)\n"
+                "    \n"
+                "    return m\n\n"
+                "# Affichage dans Streamlit\n"
+                "map_obj = create_map(46.17, 1.87, CINEMAS, user_location=[46.17, 1.87])\n"
+                "st_folium(map_obj, width=800, height=500)  # Affiche carte interactive\n"
+                "```\n\n"
+                "💡 **Autres styles de carte disponibles**\n"
+                "- `'OpenStreetMap'` : Classique gratuit\n"
+                "- `'CartoDB positron'` : Minimaliste clair\n"
+                "- `'CartoDB dark_matter'` : Mode sombre"
+            )
+
+            # ÉTAPE 3
+            st.subheader("📏 Étape 3 — Calcul de distance (formule de Haversine)")
+            st.markdown(
+                "Pour trier les cinémas du plus proche au plus loin, on calcule la distance **à vol d'oiseau**.\n\n"
+                "**🌍 Formule de Haversine**\n"
+                "```python\n"
+                "import math\n\n"
+                "def calculate_cinema_distance(user_lat, user_lon, cinema_lat, cinema_lon):\n"
+                "    '''Calcule distance en km entre deux points GPS (formule Haversine)'''\n"
+                "    \n"
+                "    # Rayon de la Terre en km\n"
+                "    R = 6371\n"
+                "    \n"
+                "    # Conversion degrés → radians\n"
+                "    lat1, lon1 = math.radians(user_lat), math.radians(user_lon)\n"
+                "    lat2, lon2 = math.radians(cinema_lat), math.radians(cinema_lon)\n"
+                "    \n"
+                "    # Différences\n"
+                "    dlat = lat2 - lat1\n"
+                "    dlon = lon2 - lon1\n"
+                "    \n"
+                "    # Formule de Haversine\n"
+                "    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2\n"
+                "    c = 2 * math.asin(math.sqrt(a))\n"
+                "    \n"
+                "    distance_km = R * c\n"
+                "    \n"
+                "    return round(distance_km, 2)\n"
+                "```\n\n"
+                "**📊 Exemple de calcul**\n"
+                "```python\n"
+                "# Position utilisateur : Guéret (46.1703, 1.8717)\n"
+                "# Cinéma Sénéchal : Guéret (46.1689, 1.8735)\n\n"
+                "distance = calculate_cinema_distance(46.1703, 1.8717, 46.1689, 1.8735)\n"
+                "print(f'Distance : {distance} km')  # → Distance : 0.18 km (180 mètres)\n"
+                "```\n\n"
+                "💡 **Pourquoi Haversine ?**\n"
+                "La Terre est ronde, pas plate ! La formule prend en compte la courbure terrestre "
+                "pour un calcul précis même sur de longues distances."
+            )
+
+            st.success(
+                "💡 **Intérêt pour le projet Cinéma Creuse**\n\n"
+                "Cette page aide les habitants à :\n"
+                "- ✅ Trouver le cinéma **le plus proche** rapidement\n"
+                "- ✅ Voir quels films **sont à l'affiche** dans chaque salle\n"
+                "- ✅ Planifier leur sortie cinéma en fonction de la **distance** et des **horaires**\n\n"
+                "Pour les gérants de cinémas, c'est un outil de **visibilité** qui valorise leur programmation locale !"
+            )
+
+        
+    
+    # ==========================================
     # SECTION 1 : LOCALISATION UTILISATEUR
     # ==========================================
     
@@ -1792,7 +2690,7 @@ elif page == "🗺️ Cinémas Creuse":
                             with st.expander("📄 Plus d'infos"):
                                 # Synopsis complet (SANS image)
                                 st.markdown("**📝 Synopsis**")
-                                st.write(film['synopsis'])
+                                st.markdown(film['synopsis'])
                                 
                                 st.markdown("---")
                                 
@@ -1860,6 +2758,127 @@ elif page == "🎭 Activités Annexes":
     st.title("🎭 Activités Annexes")
     st.markdown("### Événements et animations autour du cinéma")
     
+    # ==========================================
+    # EXPANDER PÉDAGOGIQUE : EXPLICATION SYSTÈME ÉVÉNEMENTS
+    # ==========================================
+    with st.expander("📚 Comprendre le système d'événements culturels", expanded=False, icon="🎭"):
+        col1, col2, col3 = st.columns([1, 8, 1])
+
+        with col2:
+            st.caption("🎓 Découvrez comment gérer et afficher des événements culturels annexes.")
+
+            st.markdown("**📝 Données statiques → 🔍 Filtrage → 📅 Tri → 🎭 Affichage**")
+            st.divider()
+
+            # CONCEPT
+            st.subheader("🎯 Concept : Valoriser l'expérience cinéma")
+            st.markdown(
+                "Au-delà du film, les cinémas proposent des **activités complémentaires** :\n"
+                "- 🎬 Projections spéciales (avant-premières, ciné-débats)\n"
+                "- 🎤 Rencontres avec réalisateurs/acteurs\n"
+                "- 🎨 Ateliers créatifs (stop-motion, montage)\n"
+                "- 🎶 Ciné-concerts\n"
+                "- 🧘 Séances bien-être (ciné-yoga)\n\n"
+                "Cette page centralise tous ces événements en un seul endroit."
+            )
+
+            # ÉTAPE 1
+            st.subheader("📝 Étape 1 — Structure des données")
+            st.markdown(
+                "Les activités sont stockées dans une **liste de dictionnaires Python**.\n\n"
+                "**🗂️ Fichier utils.py**\n"
+                "```python\n"
+                "ACTIVITES_ANNEXES = [\n"
+                "    {\n"
+                "        'type': 'Ciné-débat',\n"
+                "        'titre': 'Soirée Christopher Nolan',\n"
+                "        'description': 'Projection Oppenheimer + débat avec critique cinéma',\n"
+                "        'cinema': 'Sénéchal (Guéret)',\n"
+                "        'date': '2026-02-15',\n"
+                "        'horaire': '20h00',\n"
+                "        'tarif': '12€'\n"
+                "    },\n"
+                "    # ... autres activités\n"
+                "]\n"
+                "```\n\n"
+                "💡 **Pourquoi des dictionnaires ?**\n"
+                "Facile à lire, modifier, et parcourir. Pour une vraie app, on utiliserait une base de données."
+            )
+
+            # ÉTAPE 2
+            st.subheader("🔍 Étape 2 — Système de filtrage")
+            st.markdown(
+                "Les utilisateurs peuvent filtrer par **type d'activité**.\n\n"
+                "**🎚️ Interface Streamlit**\n"
+                "```python\n"
+                "# 1. Extraire tous les types uniques\n"
+                "all_types = list(set([a['type'] for a in ACTIVITES_ANNEXES]))\n\n"
+                "# 2. Multiselect pour sélection multiple\n"
+                "filter_type = st.multiselect(\n"
+                "    'Filtrer par type',\n"
+                "    options=all_types,\n"
+                "    default=[]  # Rien sélectionné = tout affiché\n"
+                ")\n\n"
+                "# 3. Filtrer la liste\n"
+                "filtered_activities = [\n"
+                "    a for a in ACTIVITES_ANNEXES \n"
+                "    if a['type'] in filter_type\n"
+                "]\n"
+                "```"
+            )
+
+            # ÉTAPE 3
+            st.subheader("📅 Étape 3 — Tri par date")
+            st.markdown(
+                "Les événements peuvent être triés chronologiquement.\n\n"
+                "**🔀 Tri avec sorted()**\n"
+                "```python\n"
+                "sort_by_date = st.checkbox('Trier par date', value=True)\n\n"
+                "if sort_by_date:\n"
+                "    filtered_activities = sorted(\n"
+                "        filtered_activities,\n"
+                "        key=lambda x: x['date']  # Utilise 'date' pour comparer\n"
+                "    )\n"
+                "```\n\n"
+                "💡 **Pourquoi lambda ?**\n"
+                "`lambda x: x['date']` dit : 'pour chaque activité x, utilise x['date'] pour le tri'"
+            )
+
+            # ÉTAPE 4
+            st.subheader("🎭 Étape 4 — Affichage avec expanders")
+            st.markdown(
+                "Chaque activité s'affiche dans un `st.expander()`.\n\n"
+                "**📦 Boucle d'affichage**\n"
+                "```python\n"
+                "for activity in filtered_activities:\n"
+                "    with st.expander(f\"{activity['type']} - {activity['titre']}\"):\n"
+                "        col1, col2 = st.columns([2, 1])\n"
+                "        \n"
+                "        with col1:\n"
+                "            st.markdown(f\"**📝 Description** : {activity['description']}\")\n"
+                "            st.markdown(f\"**🎬 Cinéma** : {activity['cinema']}\")\n"
+                "        \n"
+                "        with col2:\n"
+                "            st.markdown(f\"### {activity['tarif']}\")\n"
+                "            if st.button('Réserver', key=f\"book_{activity['titre']}\"):\n"
+                "                st.success('Réservation simulée !')\n"
+                "```\n\n"
+                "💡 **Importance du key**\n"
+                "`key=f'book_{title}'` donne un ID unique à chaque bouton (sinon Streamlit confond)"
+            )
+
+            st.info(
+                "💡 **Valeur ajoutée pour les cinémas**\n\n"
+                "Cette page permet aux cinémas de :\n"
+                "- ✅ **Diversifier leurs revenus** (ateliers payants, événements)\n"
+                "- ✅ **Fidéliser le public** (créer une communauté)\n"
+                "- ✅ **Se différencier** de la concurrence streaming\n"
+                "- ✅ **Attirer de nouveaux publics** (enfants, seniors)\n\n"
+                "Les activités annexes sont un **levier majeur** pour la survie des cinémas ruraux !"
+            )
+
+        
+    
     # Filtres
     col1, col2 = st.columns([2, 1])
     
@@ -1917,6 +2936,172 @@ elif page == "📊 Espace B2B":
     
     if not check_password():
         st.stop()
+    
+    # ==========================================
+    # EXPANDER PÉDAGOGIQUE : EXPLICATION ANALYSE BUSINESS
+    # ==========================================
+    with st.expander("📚 Comprendre l'analyse de marché B2B", expanded=False, icon="📊"):
+        col1, col2, col3 = st.columns([1, 8, 1])
+
+        with col2:
+            st.caption("🎓 Découvrez comment analyser le marché du cinéma avec des données réelles et des visualisations.")
+
+            st.markdown("**📊 Données Excel → 🔍 Analyse → 📈 Visualisations → 💡 Insights business**")
+            st.divider()
+
+            # CONCEPT
+            st.subheader("🎯 Objectif : Aide à la décision pour gérants")
+            st.markdown(
+                "L'**Espace B2B** (Business to Business) est réservé aux professionnels du cinéma.\n\n"
+                "**🎬 Qui utilise cette page ?**\n"
+                "- Gérants de cinémas indépendants\n"
+                "- Responsables de programmation\n"
+                "- Décideurs investissant dans des salles rurales\n\n"
+                "**🎯 Objectif**\n"
+                "Fournir des **analyses chiffrées** pour prendre de meilleures décisions :\n"
+                "- Qui est mon public cible ? (âge, CSP, habitudes)\n"
+                "- Quels sont mes concurrents ? (streaming, autres cinémas)\n"
+                "- Quelle programmation optimiser ? (genres, durées)\n"
+                "- Quelles activités annexes développer ?"
+            )
+
+            # ÉTAPE 1
+            st.subheader("📊 Étape 1 — Structure des données Excel")
+            st.markdown(
+                "Toutes les données proviennent d'un **fichier Excel multi-feuilles**.\n\n"
+                "**📁 Fichier : `Cinemas_existants_creuse.xlsx`**\n"
+                "```python\n"
+                "# Chargement avec pandas\n"
+                "data = {\n"
+                "    'cine_csp_g': pd.read_excel(excel_path, sheet_name='Cine_CSP_Global'),\n"
+                "    'pop_c': pd.read_excel(excel_path, sheet_name='Population_creuse'),\n"
+                "    'movies_type_g': pd.read_excel(excel_path, sheet_name='movies_type_shares'),\n"
+                "    # ... 11 feuilles au total\n"
+                "}\n"
+                "```\n\n"
+                "**📋 Exemples de feuilles**\n"
+                "- `Population_creuse` : Pyramide des âges par tranche\n"
+                "- `Cine_CSP_Global` : Fréquentation par CSP\n"
+                "- `movies_type_shares` : Parts de marché par genre\n"
+                "- `prix_mensuel` : Comparaison streaming vs cinéma"
+            )
+
+            # ÉTAPE 2
+            st.subheader("📈 Étape 2 — Création de graphiques personnalisés")
+            st.markdown(
+                "Toutes les visualisations utilisent `create_styled_barplot()` depuis utils.py.\n\n"
+                "**🎨 Fonction générique**\n"
+                "```python\n"
+                "def create_styled_barplot(data, x, y, hue=None, title='',\n"
+                "                         palette=None, show_values=False):\n"
+                "    '''Crée un barplot avec la palette Creuse'''\n"
+                "    \n"
+                "    fig, ax = plt.subplots(figsize=(10,6))\n"
+                "    sns.barplot(data=data, x=x, y=y, hue=hue, palette=palette, ax=ax)\n"
+                "    ax.set_title(title, fontsize=14, fontweight='bold')\n"
+                "    \n"
+                "    if show_values:\n"
+                "        for container in ax.containers:\n"
+                "            ax.bar_label(container, fmt='%.1f', padding=3)\n"
+                "    \n"
+                "    return fig, ax\n"
+                "```\n\n"
+                "**📊 Exemple d'utilisation**\n"
+                "```python\n"
+                "fig, ax = create_styled_barplot(\n"
+                "    data=data['cine_csp_g'],\n"
+                "    x='CSP',\n"
+                "    y='Part des entrées (%)',\n"
+                "    title='Fréquentation par CSP',\n"
+                "    palette=PALETTE_CREUSE['gradient'],\n"
+                "    show_values=True\n"
+                ")\n"
+                "st.pyplot(fig)\n"
+                "```"
+            )
+
+            # ÉTAPE 3
+            st.subheader("🔄 Étape 3 — Navigation entre graphiques")
+            st.markdown(
+                "Pour ne pas surcharger la page, on utilise un **système de carrousel**.\n\n"
+                "**🎠 Système de navigation**\n"
+                "```python\n"
+                "# 1. Définir liste de graphiques\n"
+                "graphs = [\n"
+                "    {'title': '👥 Structure population', 'key': 'population'},\n"
+                "    {'title': '💰 Evolution recettes', 'key': 'revenues'}\n"
+                "]\n\n"
+                "# 2. Initialiser index dans session_state\n"
+                "if 'graph_index_tab1' not in st.session_state:\n"
+                "    st.session_state.graph_index_tab1 = 0\n\n"
+                "# 3. Boutons Précédent/Suivant\n"
+                "if st.button('◀ Précédent'):\n"
+                "    st.session_state.graph_index_tab1 = \\\n"
+                "        (st.session_state.graph_index_tab1 - 1) % len(graphs)\n"
+                "    st.rerun()\n\n"
+                "# 4. Afficher graphique actuel\n"
+                "current = graphs[st.session_state.graph_index_tab1]\n"
+                "```\n\n"
+                "💡 **Astuce modulo %**\n"
+                "`(index + 1) % len(graphs)` fait boucler : 0→1→2→0→1→..."
+            )
+
+            # ÉTAPE 4
+            st.subheader("🪖 Étape 4 — Analyse SWOT")
+            st.markdown(
+                "**SWOT = Strengths, Weaknesses, Opportunities, Threats**\n\n"
+                "Matrice stratégique pour évaluer la situation d'une entreprise.\n\n"
+                "**📊 Structure dans Streamlit**\n"
+                "```python\n"
+                "col1, col2 = st.columns(2)\n\n"
+                "with col1:\n"
+                "    st.markdown('**💪 Forces**')\n"
+                "    st.markdown('- Cinémas de proximité')\n"
+                "    \n"
+                "    st.markdown('**⚠️ Faiblesses**')\n"
+                "    st.markdown('- Baisse de fréquentation')\n\n"
+                "with col2:\n"
+                "    st.markdown('**🚀 Opportunités**')\n"
+                "    st.markdown('- Tourisme culturel')\n"
+                "    \n"
+                "    st.markdown('**⚡ Menaces**')\n"
+                "    st.markdown('- Concurrence streaming')\n"
+                "```"
+            )
+
+            # RÉCAP
+            st.markdown("---")
+            st.markdown("**📋 Structure complète de l'Espace B2B**")
+            st.markdown(
+                "**Tab 1 : Analyse de marché** (3 graphiques)\n"
+                "- Pyramide des âges locale\n"
+                "- Évolution des attentes européennes\n"
+                "- Évolution des recettes (confiserie + pub)\n\n"
+                "**Tab 2 : Analyse concurrentielle** (2 graphiques)\n"
+                "- Prix streaming vs cinéma (mensuel)\n"
+                "- Parts de marché par type de film\n\n"
+                "**Tab 3 : Analyse interne** (4 graphiques)\n"
+                "- Fréquentation par CSP\n"
+                "- Fréquentation par tranche d'âge\n"
+                "- Types de films projetés\n"
+                "- Programmation mensuelle\n\n"
+                "**Tab 4 : SWOT**\n"
+                "- Matrice Forces/Faiblesses/Opportunités/Menaces\n\n"
+                "**Tab 5 : Export**\n"
+                "- Téléchargement CSV des films et cinémas"
+            )
+
+            st.success(
+                "💡 **Impact business**\n\n"
+                "Cette analyse permet aux gérants de :\n"
+                "- ✅ **Adapter la programmation** au public local (âge, CSP)\n"
+                "- ✅ **Se positionner** face à la concurrence streaming\n"
+                "- ✅ **Identifier opportunités** de diversification\n"
+                "- ✅ **Justifier investissements** auprès de financeurs (CNC, mairie)\n\n"
+                "Les données chiffrées sont **essentielles** pour convaincre et décider !"
+            )
+
+        
     
     # Métriques clés
     st.subheader("📊 Métriques clés de votre département")
@@ -2060,7 +3245,7 @@ elif page == "📊 Espace B2B":
                 with col1:
                     try:
                         st.image(
-                            r"C:/Users/paulc/Documents/PROJET 2/data/images/recovery_rates_post_covid.png",
+                            DATA_DIR / "images" / "recovery_rates_post_covid.png",
                             caption="Retour en salles, période post-covid"
                         )
                     except:
@@ -2070,7 +3255,7 @@ elif page == "📊 Espace B2B":
                 with col2:
                     try:
                         st.image(
-                            r"C:/Users/paulc/Documents/PROJET 2/data/images/origin_of_films.png",
+                            DATA_DIR / "images" / "origin_of_films.png",
                             caption="Origine des films visionnés en Europe"
                         )
                     except:
@@ -2161,7 +3346,7 @@ elif page == "📊 Espace B2B":
                 
                 try:
                     st.image(
-                        r"C:/Users/paulc/Documents/PROJET 2/data/images/advertising_expenditures.png",
+                        DATA_DIR / "images" / "advertising_expenditures.png",
                         caption="Dépenses publicitaires"
                     )
                 except:
