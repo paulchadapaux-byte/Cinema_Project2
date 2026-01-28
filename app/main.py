@@ -16,7 +16,7 @@ from streamlit_folium import st_folium
 # Imports depuis utils.py
 from utils import (
     PALETTE_CREUSE, CINEMAS, VILLES_CREUSE, ACTIVITES_ANNEXES,
-    get_project_root, enrich_movie_with_tmdb, format_genre,
+    get_project_root, enrich_movie_with_tmdb, format_genre, translate_genres,
     safe_get, check_password, create_map, create_styled_barplot,
     get_now_playing_france, match_now_playing_with_imdb,
     assign_films_to_cinemas, calculate_cinema_distance,
@@ -55,7 +55,8 @@ plt.rcParams['grid.alpha'] = 0.3
 # ==========================================
 # get_project_root() depuis utils.py détecte la racine du projet
 PROJECT_ROOT = get_project_root()
-DATA_DIR = PROJECT_ROOT / "data" 
+DATA_DIR = PROJECT_ROOT / "data"
+
 
 @st.cache_data
 def load_excel_data():
@@ -215,222 +216,254 @@ if data is None:
 
 
 # ==========================================
-# SYSTÈME DE RECOMMANDATION KNN (PIPELINE SCIKIT-LEARN)
+# SYSTÈME DE RECOMMANDATION KNN SIMPLIFIÉ 
 # ==========================================
+# Utilise uniquement pandas + sklearn de base
+# Pas de classes custom, pas de ColumnTransformer complexe
+#
 # Architecture :
-# 1. build_knn_pipeline() : ColumnTransformer + NearestNeighbors (cached)
-# 2. get_recommendations_knn() : Query sur index KNN→retour top-N voisins
-# 3. get_recommendations() : Wrapper API avec gestion erreurs
+# 1. build_knn_simple() : pandas + StandardScaler + NearestNeighbors (cached)
+# 2. get_recommendations_knn() : Trouve les N films similaires
+# 3. get_recommendations() : Wrapper avec gestion d'erreurs
 # ==========================================
 
 @st.cache_resource
-def build_knn_pipeline(df: pd.DataFrame):
+@st.cache_resource(show_spinner="🔄 Construction du modèle KNN...")
+def build_knn_simple(df: pd.DataFrame):
     """
-    Construit pipeline ML réutilisable pour recommandations par similarité cosine
+    Construit un modèle KNN PROPRE avec ColumnTransformer et Pipeline
     
-    Workflow pédagogique WCS :
-    1. Séparation meta (tconst, titres) vs features (genres, année, durée)
-    2. GenreMultiHot : transforme list["Action","Drama"] → sparse matrix (0/1)
-    3. ColumnTransformer : genres (passthrough) + numériques (imputation+scaler)
-    4. NearestNeighbors : indexe l'espace transformé avec metric="cosine"
+    Architecture sklearn professionnelle :
+    1. Preprocessing : Transformer listes (genres, acteurs, réalisateurs) en colonnes 0/1
+    2. ColumnTransformer : Séparer colonnes binaires vs numériques
+    3. Pipeline : preprocessor + NearestNeighbors
     
     Args:
-        df: DataFrame IMDb avec colonnes [genre, startYear, durée, titre, tconst]
+        df: DataFrame avec colonnes [genre, acteurs, realisateurs, startYear, durée]
     
     Returns:
         dict: {
-            'meta_cols': list des colonnes d'affichage,
-            'feature_cols': dict des colonnes utilisées pour similarité,
-            'preprocessor': ColumnTransformer fitted,
-            'X': matrice sparse/dense des features transformées,
-            'knn': modèle NearestNeighbors fitted
+            'df_features': DataFrame avec toutes les colonnes préparées,
+            'pipeline': Pipeline sklearn complet,
+            'preprocessor': ColumnTransformer,
+            'binary_cols': Liste des colonnes binaires,
+            'numeric_cols': Liste des colonnes numériques
         }
-    
-    Note: @st.cache_resource persiste le pipeline en mémoire (pas recalculé à chaque query)
     """
-    # Imports sklearn locaux (évite pollution namespace global)
-    from sklearn.base import BaseEstimator, TransformerMixin
+    from sklearn.preprocessing import MultiLabelBinarizer, StandardScaler
     from sklearn.compose import ColumnTransformer
     from sklearn.pipeline import Pipeline
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.impute import SimpleImputer
     from sklearn.neighbors import NearestNeighbors
-    from scipy import sparse
-    import numpy as np
-
+    from collections import Counter
+    
+    st.sidebar.info("🔄 Étape 1/3 : Préparation des features...")
+    
     # ==========================================
-    # ÉTAPE 1 : SÉPARATION META VS FEATURES
-    # Meta = colonnes pour affichage final (tconst, titre, display_title)
-    # Features = colonnes pour calcul similarité (genre, startYear, durée)
+    # ÉTAPE 1 : PRÉPARER LES FEATURES
     # ==========================================
-    meta_cols = [c for c in ["tconst", "titre", "display_title"] if c in df.columns]
-
-    # Vérification présence features dans DataFrame (robustesse si colonnes manquantes)
-    genre_col = "genre" if "genre" in df.columns else None
-    numeric_cols = [c for c in ["startYear", "durée"] if c in df.columns]
-
-    # ==========================================
-    # ÉTAPE 2 : TRANSFORMER CUSTOM POUR GENRES (MULTI-HOT ENCODING)
-    # Input: Series de listes ["Action", "Drama"]
-    # Output: Sparse matrix (n_films, n_genres) avec 0/1
-    # Méthode : fit() construit vocabulaire, transform() crée matrice CSR
-    # ==========================================
-    class GenreMultiHot(BaseEstimator, TransformerMixin):
-        """
-        Transformer custom pour encoder listes de genres en matrice sparse binaire
-        
-        Workflow :
-        - fit() : construit vocabulaire unique (self.vocab_) depuis toutes les listes
-        - transform() : pour chaque film, active colonnes des genres présents (1), autres 0
-        - Utilise scipy.sparse.csr_matrix pour efficacité mémoire (majoritairement 0)
-        
-        Compatible sklearn (BaseEstimator, TransformerMixin) pour intégration ColumnTransformer
-        """
-        def fit(self, X, y=None):
-            # X arrive en 2D (n_samples, 1) depuis ColumnTransformer
-            # Ravel() aplatit en 1D pour itérer sur listes de genres
-            genres_lists = [g if isinstance(g, list) else [] for g in X.ravel()]
-            vocab = set()
-            for gl in genres_lists:
-                for item in gl:
-                    if isinstance(item, str) and item.strip():
-                        vocab.add(item.strip())
-            self.vocab_ = sorted(vocab)
-            self.index_ = {g: i for i, g in enumerate(self.vocab_)}
-            return self
-
-        def transform(self, X):
-            # Même traitement : flatten vers listes de genres
-            genres_lists = [g if isinstance(g, list) else [] for g in X.ravel()]
-            n = len(genres_lists)
-            m = len(self.vocab_)
-            # Construction matrice sparse COO→CSR (efficient storage)
-            # Pour chaque (film_i, genre_j) présent : ajoute 1.0 à rows[i], cols[j]
-            rows, cols, data = [], [], []
-            for i, gl in enumerate(genres_lists):
-                for item in gl:
-                    if item in self.index_:
-                        rows.append(i)
-                        cols.append(self.index_[item])
-                        data.append(1.0)
-            return sparse.csr_matrix((data, (rows, cols)), shape=(n, m))
-
-        def get_feature_names_out(self, input_features=None):
-            return np.array([f"genre__{g}" for g in self.vocab_], dtype=object)
-
-    # ==========================================
-    # ÉTAPE 3 : CONSTRUCTION PREPROCESSOR (COLUMNTRANSFORMER)
-    # Pipeline composé :
-    # - "genres" : GenreMultiHot (pas de scaling, déjà 0/1)
-    # - "num" : SimpleImputer(median) + StandardScaler() pour durée/année
-    # remainder="drop" : ignore autres colonnes (meta déjà isolées)
-    # ==========================================
-    transformers = []
-
-    if genre_col is not None:
-        transformers.append(
-            ("genres", GenreMultiHot(), [genre_col])
-        )
-
-    if numeric_cols:
-        numeric_pipe = Pipeline(steps=[
-            ("imputer", SimpleImputer(strategy="median")),  # Remplit NaN avant scaling
-            ("scaler", StandardScaler())  # (X - mean) / std
-        ])
-        transformers.append(
-            ("num", numeric_pipe, numeric_cols)
-        )
-
-    preprocessor = ColumnTransformer(
-        transformers=transformers,
-        remainder="drop"  # Ignore colonnes non listées
+    
+    # 1.1 GENRES (MultiLabelBinarizer)
+    mlb_genres = MultiLabelBinarizer()
+    X_genres = mlb_genres.fit_transform(df['genre'])
+    df_genres = pd.DataFrame(
+        X_genres,
+        columns=[f'genre_{g}' for g in mlb_genres.classes_],
+        index=df.index
     )
-
+    
+    st.sidebar.success(f"✅ Genres : {len(mlb_genres.classes_)} colonnes")
+    
+    # 1.2 RÉALISATEURS (Top 50)
+    df_directors = None
+    director_col = None
+    
+    for col_name in ['realisateurs', 'directors', 'director']:
+        if col_name in df.columns:
+            director_col = col_name
+            break
+    
+    if director_col:
+        directors_list = []
+        for directors in df[director_col]:
+            if isinstance(directors, (list, tuple, np.ndarray)) and len(directors) > 0:
+                directors_list.append(directors[0])
+            else:
+                directors_list.append('')
+        
+        director_counts = Counter(directors_list)
+        top_directors = [d for d, _ in director_counts.most_common(50) if d != '']
+        
+        director_data = {}
+        for director in top_directors:
+            col_name = f'director_{director.replace(" ", "_")[:30]}'
+            director_data[col_name] = [
+                1 if isinstance(d, (list, tuple, np.ndarray)) and len(d) > 0 and d[0] == director else 0
+                for d in df[director_col]
+            ]
+        
+        df_directors = pd.DataFrame(director_data, index=df.index)
+        st.sidebar.success(f"✅ Réalisateurs : {len(top_directors)} colonnes")
+    else:
+        st.sidebar.warning("⚠️ Pas de colonne réalisateur")
+    
+    # 1.3 ACTEURS (Top 100)
+    df_actors = None
+    actor_col = None
+    
+    for col_name in ['acteurs', 'actors', 'cast']:
+        if col_name in df.columns:
+            actor_col = col_name
+            break
+    
+    if actor_col:
+        all_actors = []
+        for actors in df[actor_col]:
+            if isinstance(actors, (list, tuple, np.ndarray)) and len(actors) > 0:
+                all_actors.extend(actors[:5])
+        
+        actor_counts = Counter(all_actors)
+        top_actors = [a for a, _ in actor_counts.most_common(100)]
+        
+        actor_data = {}
+        for actor in top_actors:
+            col_name = f'actor_{actor.replace(" ", "_")[:30]}'
+            actor_data[col_name] = [
+                1 if isinstance(a, (list, tuple, np.ndarray)) and any(act == actor for act in a[:5]) else 0
+                for a in df[actor_col]
+            ]
+        
+        df_actors = pd.DataFrame(actor_data, index=df.index)
+        st.sidebar.success(f"✅ Acteurs : {len(top_actors)} colonnes")
+    else:
+        st.sidebar.warning("⚠️ Pas de colonne acteurs")
+    
+    # 1.4 FEATURES NUMÉRIQUES
+    numeric_cols = ['startYear', 'durée']
+    df_numeric = df[numeric_cols].copy()
+    df_numeric = df_numeric.fillna(df_numeric.median())
+    
+    # 1.5 COMBINER
+    dfs_to_concat = [df_genres, df_numeric]
+    if df_directors is not None:
+        dfs_to_concat.append(df_directors)
+    if df_actors is not None:
+        dfs_to_concat.append(df_actors)
+    
+    df_features = pd.concat(dfs_to_concat, axis=1)
+    
+    st.sidebar.info("🔄 Étape 2/3 : Construction du Pipeline...")
+    
     # ==========================================
-    # ÉTAPE 4 : FIT_TRANSFORM SUR DATAFRAME → MATRICE FEATURES X
-    # preprocessor.fit_transform() applique tous transformers en parallèle
-    # Résultat : matrice (n_films, n_features_totales) = genres_0/1 + scaled_nums
+    # ÉTAPE 2 : COLUMNSTRANSFORMER + PIPELINE
     # ==========================================
-    X = preprocessor.fit_transform(df)
-
-    # ==========================================
-    # ÉTAPE 5 : MODÈLE KNN NON-SUPERVISÉ (INDEXATION COSINE)
-    # NearestNeighbors(metric="cosine", algorithm="brute")
-    # - metric="cosine" : mesure similarité angulaire (1 - cosine_distance)
-    # - algorithm="brute" : calcul exact (recommandé pour sparse/binaire)
-    # knn.fit(X) indexe l'espace → ensuite knn.kneighbors(query) trouve voisins
-    # ==========================================
-    knn = NearestNeighbors(metric="cosine", algorithm="brute")
-    knn.fit(X)
-
+    
+    # Identifier colonnes binaires vs numériques
+    binary_cols = df_features.loc[:, df_features.nunique() == 2].columns.tolist()
+    numeric_cols_final = df_features.drop(binary_cols, axis=1).columns.tolist()
+    
+    # ColumnTransformer
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('binary', 'passthrough', binary_cols),
+            ('numeric', StandardScaler(), numeric_cols_final)
+        ],
+        remainder='drop'
+    )
+    
+    # Pipeline
+    pipeline = Pipeline([
+        ('preprocessor', preprocessor),
+        ('knn', NearestNeighbors(metric='cosine', algorithm='brute'))
+    ])
+    
+    st.sidebar.info("🔄 Étape 3/3 : Entraînement...")
+    
+    # Fit
+    pipeline.fit(df_features)
+    
+    # Afficher récapitulatif
+    st.sidebar.divider()
+    st.sidebar.success(f"✅ Modèle KNN entraîné !")
+    st.sidebar.info(f"📊 **{df_features.shape[1]} features totales**")
+    st.sidebar.caption(f"  • Genres : {len(df_genres.columns)}")
+    st.sidebar.caption(f"  • Numériques : {len(numeric_cols)}")
+    if df_directors is not None:
+        st.sidebar.caption(f"  • Réalisateurs : {len(df_directors.columns)}")
+    if df_actors is not None:
+        st.sidebar.caption(f"  • Acteurs : {len(df_actors.columns)}")
+    st.sidebar.divider()
+    
     return {
-        "meta_cols": meta_cols,
-        "feature_cols": {"genre": genre_col, "numeric": numeric_cols},
-        "preprocessor": preprocessor,
-        "X": X,
-        "knn": knn,
+        'df_features': df_features,
+        'pipeline': pipeline,
+        'preprocessor': preprocessor,
+        'binary_cols': binary_cols,
+        'numeric_cols': numeric_cols_final
     }
 
 
-def get_recommendations_knn(df: pd.DataFrame, movie_index: int, n: int = 10):
+def get_recommendations_knn(df: pd.DataFrame, movie_index: int, n: int = 10, min_quality: bool = True):
     """
-    Génère N recommandations pour un film via KNN cosine
-    
-    Workflow :
-    1. Récupère engine (preprocessor + X + knn) via build_knn_pipeline(df)
-    2. Extrait vecteur du film movie_index depuis X[movie_index]
-    3. knn.kneighbors() trouve k=n+1 plus proches voisins (inclut film lui-même)
-    4. Retire le film source (indices[0]==movie_index typiquement)
-    5. Retourne DataFrame des N films les plus similaires
+    Trouve les N films les plus similaires avec Pipeline sklearn
     
     Args:
-        df: DataFrame IMDb complet (aligné avec X du pipeline)
-        movie_index: Position int du film de référence dans df (iloc index)
-        n: Nombre de recommandations souhaitées (défaut 10)
+        df: DataFrame original avec tous les films
+        movie_index: Position du film dans le DataFrame (iloc)
+        n: Nombre de recommandations à retourner
+        min_quality: Si True, filtre les films avec note > 0
     
     Returns:
-        pd.DataFrame: Sous-ensemble de df contenant N films similaires
-    
-    Note: Le premier voisin retourné par kneighbors() est quasi toujours le film lui-même
-          (distance cosine ≈ 0) → on le filtre systématiquement
+        pd.DataFrame: Les N films les plus similaires
     """
-    engine = build_knn_pipeline(df)
-    knn = engine["knn"]
-    X = engine["X"]
-
-    # Demande n+1 voisins car premier=film source (self-match)
-    k = min(n + 1, len(df))
-    distances, indices = knn.kneighbors(X[movie_index], n_neighbors=k)
-
-    neighbors = indices.ravel().tolist()
-
-    # Filtrage explicite du film source (sécurité si présent)
-    neighbors = [i for i in neighbors if i != movie_index]
-
-    # Tronque à n résultats finaux
-    neighbors = neighbors[:n]
-
-    return df.iloc[neighbors]
+    # Construire le modèle
+    engine = build_knn_simple(df)
+    df_features = engine['df_features']
+    pipeline = engine['pipeline']
+    knn = pipeline.named_steps['knn']
+    
+    # Transformer les features
+    X_transformed = pipeline.named_steps['preprocessor'].transform(df_features)
+    
+    # Chercher plus de voisins si filtrage activé
+    search_neighbors = (n * 3) + 1 if min_quality else n + 1
+    
+    # KNN
+    distances, indices = knn.kneighbors(
+        [X_transformed[movie_index]], 
+        n_neighbors=search_neighbors
+    )
+    
+    # Retirer le film lui-même
+    neighbor_indices = indices[0][1:]
+    neighbor_distances = distances[0][1:]
+    
+    # Récupérer les films
+    recommendations = df.iloc[neighbor_indices].copy()
+    
+    # Ajouter similarité (1 - distance cosine)
+    recommendations['similarite'] = 1 - neighbor_distances
+    
+    # Filtrage qualité optionnel
+    if min_quality:
+        recommendations = recommendations[recommendations.get('note', 0) > 0]
+    
+    # Retourner seulement N films
+    return recommendations.head(n)
 
 
 def get_recommendations(df: pd.DataFrame, movie_index: int, n: int = 10):
     """
-    Wrapper API robuste pour recommandations KNN
-    
-    Fournit interface stable avec gestion erreurs :
-    - Succès : retourne (DataFrame recommandations, "KNN (cosine)")
-    - Échec : retourne (DataFrame vide, "KNN (indisponible)")
+    Wrapper simple pour gérer les erreurs
     
     Args:
-        df: DataFrame IMDb
-        movie_index: Index du film source
+        df: DataFrame avec tous les films
+        movie_index: Position du film source
         n: Nombre de recommandations
     
     Returns:
-        tuple: (pd.DataFrame, str) = (films recommandés, nom de la méthode)
+        tuple: (DataFrame des films recommandés, nom de la méthode)
     
-    Note: Compatibilité avec ancien système (même signature API)
-          mais sans fallback "similarité maison" → DF vide si KNN échoue
+    Note: Renvoie DataFrame vide si KNN échoue
     """
     try:
         reco = get_recommendations_knn(df, movie_index, n)
@@ -872,7 +905,7 @@ elif page == "🎬 Films à l'affiche":
     # ==========================================
     # EXPANDER PÉDAGOGIQUE : EXPLICATION API TMDb
     # ==========================================
-    with st.expander("📚 Comprendre le système d'actualisation des films (API TMDb)", expanded=False, icon="🔄"):
+    with st.expander("Comprendre le système dactualisation des films API TMDb", expanded=False, icon="🔄"):
         col1, col2, col3 = st.columns([1, 8, 1])
 
         with col2:
@@ -1280,7 +1313,8 @@ elif page == "🎬 Films à l'affiche":
                         
                         genres = film.get('genres', [])
                         if genres:
-                            st.caption(f"🎭 {', '.join(genres[:2])}")
+                            genres_traduits = translate_genres(genres[:2])
+                            st.caption(f"🎭 {', '.join(genres_traduits)}")
                         
                         with st.expander("📄 Voir les détails"):
                             st.markdown("**📝 Synopsis**")
@@ -1352,7 +1386,8 @@ elif page == "🎬 Films à l'affiche":
                     
                     genres = film.get('genres', [])
                     if genres:
-                        st.caption(f"🎭 {', '.join(genres[:2])}")
+                        genres_traduits = translate_genres(genres[:2])
+                        st.caption(f"🎭 {', '.join(genres_traduits)}")
                     
                     with st.expander("📄 Voir les détails"):
                         st.markdown("**📝 Synopsis**")
@@ -1400,109 +1435,324 @@ elif page == "💡 Recommandations":
     # Documentation complète méthodologie (optionnel, collapsed par défaut)
     # Couvre : séparation données, preprocessing, cosine, KNN, limites
     # ==========================================
-    with st.expander("📚 Comprendre le système de recommandation (KNN)", expanded=False, icon="❔"):
+    with st.expander("Comprendre le système de recommandation KNN", expanded=False, icon="📚"):
         col1, col2, col3 = st.columns([1, 8, 1])
 
         with col2:
-            st.caption("🎓 En 6 étapes simples, découvrez comment notre système trouve 10 films similaires à celui que vous aimez.")
+            st.caption("Découvrez comment notre système trouve les films similaires")
 
-            st.markdown("**📊 Données → 🧹 Nettoyage → 📏 Mesure → 🔍 Recherche → ✨ Top 10 → 💡 Limites**")
+            st.markdown("**Chunks → Nettoyage → Préparation → Preprocessing → Pipeline → KNN → Similarité**")
             st.divider()
 
-            # ÉTAPE 1
-            st.subheader("📦 Étape 1 — Trier nos informations")
+            # ÉTAPE 0
+            st.subheader("Étape 0 — Récupération des données par chunks", divider= True)
             st.markdown(
-                "Imaginez une fiche de film. Elle contient deux types d'informations :\n\n"
-                "**📝 Informations pour l'affichage** (ce qu'on montre à l'utilisateur)\n"
-                "- Le titre du film : `\"Inception\"`\n"
-                "- L'année de sortie : `2010`\n"
-                "- L'identifiant IMDb : `\"tt1375666\"`\n\n"
-                "**🎯 Informations pour la comparaison** (ce qu'on utilise pour calculer)\n"
-                "- Les genres : `Action=1, Sci-Fi=1, Romance=0, Comédie=0...`\n"
-                "- La durée : `148 minutes`\n"
-                "- L'année : `2010`\n\n"
-                "💡 **Pourquoi cette séparation ?**\n"
-                "On garde le titre pour l'afficher à l'utilisateur, mais on ne peut pas \"comparer\" deux titres entre eux. "
-                "Par contre, on peut comparer des genres (0/1) et des durées (nombres) !"
+                "Avant toute chose, on récupère les données d'IMDb de manière optimisée :\n\n"
+                "- On ne conserve que les titres distribués en France, grâce à <u>title.akas.tsv.gz</u> via une analyse par chunks.\n\n"
+                "```python\n"
+                "tconst_france= {}\n"
+                "chunks = []\n"
+                "chunk_size = 500_000\n\n"
+                "for chunk in pd.read_csv('title.akas.tsv.gz', sep='\\t', chunksize=chunk_size):\n"
+                "   films_fr = chunk[chunk['region'] == 'FR']['titleId'].unique()\n"
+                "   tconst_france.update(films_fr)\n\n" 
+                "```\n\n"       
+                "- **Filtrage de <u>title.basics.tsv.gz</u> par chunks (éviter de charger 10M+ lignes)**, en conservant que les films distribués en France (liste précédente) et disposant d'un vote.\n\n"
+                "```python\n"
+                "chunks = []\n"
+                "chunk_size = 500_000\n\n"
+                "for chunk in pd.read_csv('title.basics.tsv', sep='\\t', chunksize=chunk_size):\n"
+                "    filtered = chunk[(chunk['titleType'] == 'movie') & (chunk['averageRating'] > 0)] & (chunk['tconst'].isin(tconst_france))\n"
+                "    chunks.append(filtered)\n\n"
+                "df_movies = pd.concat(chunks, ignore_index=True)\n"
+                "```\n\n"
+                "- **Jointure avec acteurs/réalisateurs** issus de la table <u>title.principals.tsv.gz</u>\n"
+                "```python\n"
+                "acteurs = df_cast[df_cast['category'].isin(['actor', 'actress'])].groupby('tconst')['primaryName'].apply(list)\n"
+                "realisateurs = df_cast[df_cast['category'] == 'director'].groupby('tconst')['primaryName'].apply(list)\n"
+                "df_movies = df_movies.merge(acteurs, on='tconst').merge(realisateurs, on='tconst')\n"
+                "```",
+                unsafe_allow_html=True
+            )
+
+            # ÉTAPE 1
+            st.subheader("Étape 1 — Nettoyage des données de notre DataFrame principal : df_movies", divider= True)
+            st.markdown(
+                "```python\n"
+                "df_movies = df_movies[df_movies['startYear'].notna()]\n"
+                "df_movies = df_movies[(df_movies['runtimeMinutes'] >= 40) & (df_movies['runtimeMinutes'] <= 300)]\n"
+                "df_movies['genre'] = df_movies['genres'].str.split(',')\n"
+                "```"
             )
 
             # ÉTAPE 2
-            st.subheader("🧹 Étape 2 — Préparer les données (preprocessing)")
+            st.subheader("Étape 2 — Préparation des données", divider= True)
             st.markdown(
-                "Les ordinateurs ne comprennent que les chiffres. Il faut donc transformer nos données :\n\n"
-                "**🎭 Les genres → Transformer en 0 et 1**\n"
-                "```python\n"
-                "# Au lieu de : genres = ['Action', 'Sci-Fi']\n"
-                "# On obtient : Action=1, Sci-Fi=1, Comédie=0, Romance=0...\n"
-                "```\n"
-                "On utilise notre classe custom `GenreMultiHot` qui fait ce travail.\n\n"
-                "**📏 Les nombres → Mettre à la même échelle**\n"
-                "```python\n"
-                "# Problème : durée=148 min, année=2010 → échelles très différentes !\n"
-                "# Solution : StandardScaler() met tout entre -2 et +2 environ\n"
-                "```\n\n"
-                "💡 **Pourquoi standardiser ?**\n"
-                "Si on ne le fait pas, l'année (valeurs ~2000) va \"écraser\" la durée (valeurs ~100-200). "
-                "Le `StandardScaler()` égalise l'importance de chaque colonne en calculant : `(valeur - moyenne) / écart-type`"
+                "On sélectionne **TOUTES** les colonnes pour calculer la similarité :\n\n"
+                "**5 types de features :**\n"
+                "- **Genres** : ['Action', 'Sci-Fi'] → genre_Action=1, genre_Sci-Fi=1\n"
+                "- **Année** : 2010 → sera standardisé\n"
+                "- **Durée** : 148 min → sera standardisé\n"
+                "- **Réalisateurs** : ['Christopher Nolan']\n"
+                "- **Acteurs** : ['Leo DiCaprio', 'Tom Hardy']\n\n"
             )
 
             # ÉTAPE 3
-            st.subheader("📏 Étape 3 — Mesurer la similarité (distance cosine)")
+            st.subheader("Étape 3 — Preprocessing", divider= True)
             st.markdown(
-                "Maintenant, comment comparer deux films ?\n\n"
-                "**🎯 Chaque film = un point dans l'espace**\n"
+                "**Problème : Les listes ne sont pas utilisables directement**\n\n"
                 "```python\n"
-                "Film A : [Action=1, Sci-Fi=1, Durée=2.1, Année=0.5]\n"
-                "Film B : [Action=1, Sci-Fi=1, Durée=2.0, Année=0.6]\n"
-                "Film C : [Comédie=1, Romance=1, Durée=-1.2, Année=-0.8]\n"
+                "df['genre'] = [['Action', 'Sci-Fi'], ...]  # ❌ KNN ne comprend pas\n"
                 "```\n\n"
-                "**📐 La distance cosine mesure l'angle**\n"
-                "- Films A et B pointent dans la **même direction** → angle petit → **très similaires** ✅\n"
-                "- Films A et C pointent dans des **directions opposées** → angle grand → **très différents** ❌\n\n"
-                "💡 **Analogie simple**\n"
-                "Imaginez deux flèches dans l'espace. Si elles pointent dans la même direction (même genres, même durée), "
-                "l'angle entre elles est petit = films similaires !"
+                "**Pourquoi pas OneHotEncoder ?**\n"
+                "```python\n"
+                "X = [['Action', 'Sci-Fi'], ['Drama']]\n"
+                "OneHotEncoder().fit(X)  # ❌ TypeError: unhashable type: 'list'\n"
+                "```\n\n"
+                "**Solution : MultiLabelBinarizer**\n"
+                "```python\n"
+                "from sklearn.preprocessing import MultiLabelBinarizer\n\n"
+                "mlb = MultiLabelBinarizer()\n"
+                "X_genres = mlb.fit_transform(df['genre'])\n"
+                "# [[1 0 0 1 0]  ← Action=1, Sci-Fi=1\n"
+                "#  [0 0 1 0 0]] ← Drama=1\n"
+                "```\n\n"
+                "MultiLabelBinarizer > OneHotEncoder car conçu pour multi-label !"
             )
-
             # ÉTAPE 4
-            st.subheader("🔍 Étape 4 — Trouver les voisins (algorithme KNN)")
+            st.subheader("Étape 4 — Pipeline sklearn", divider= True)
             st.markdown(
-                "**KNN = K-Nearest Neighbors = Les K Plus Proches Voisins**\n\n"
-                "C'est un algorithme de **Machine Learning non supervisé** (on ne lui donne pas de \"bonne réponse\", "
-                "il cherche tout seul les films les plus proches).\n\n"
-                "**Comment ça marche en pratique :**\n"
                 "```python\n"
-                "# 1. On crée le modèle avec metric='cosine' (notre mesure de distance)\n"
-                "from sklearn.neighbors import NearestNeighbors\n"
-                "knn = NearestNeighbors(metric='cosine', algorithm='brute')\n\n"
-                "# 2. On lui donne TOUS nos films pour qu'il les \"mémorise\"\n"
-                "knn.fit(X)  # X = notre tableau avec tous les films préparés\n\n"
-                "# 3. On cherche les 11 plus proches voisins d'un film\n"
-                "distances, indices = knn.kneighbors(X[42], n_neighbors=11)\n"
-                "# Pourquoi 11 ? Car le premier voisin est le film lui-même !\n"
-                "```\n\n"
-                "**⚠️ Petit piège à éviter**\n"
-                "Le film Inception cherche ses voisins → le premier voisin trouvé est... Inception lui-même ! (distance = 0)\n"
-                "→ On retire donc le premier résultat et on garde les 10 suivants."
+                "from sklearn.compose import ColumnTransformer\n"
+                "from sklearn.pipeline import Pipeline\n\n"
+                "# Séparer binaires vs numériques\n"
+                "preprocessor = ColumnTransformer([\n"
+                "    ('binary', 'passthrough', binary_cols),  # Genres, acteurs, réalisateurs\n"
+                "    ('numeric', StandardScaler(), numeric_cols)  # Année, durée\n"
+                "])\n\n"
+                "pipeline = Pipeline([\n"
+                "    ('preprocessor', preprocessor),\n"
+                "    ('knn', NearestNeighbors(metric='cosine'))\n"
+                "])\n\n"
+                "pipeline.fit(df_features)\n"
+                "```"
             )
-
+            st.image('https://i.ytimg.com/vi/kccT0FVK6OY/maxresdefault.jpg')
             # ÉTAPE 5
-            st.subheader("✨ Étape 5 — Afficher les 10 recommandations")
+            st.subheader("Étape 5 — Entraîner et utiliser le KNN", divider= True)
             st.markdown(
-                "Une fois qu'on a les indices des 10 films les plus proches, on les affiche :\n\n"
                 "```python\n"
-                "# indices = [456, 789, 123, 890, ...]  → positions dans notre DataFrame\n"
-                "recommended_films = df_movies.iloc[indices]  # On récupère les lignes\n\n"
-                "# On affiche : titre, année, genres, note...\n"
-                "for film in recommended_films:\n"
-                "    print(film['titre'], film['note'], film['genre'])\n"
+                "X_transformed = pipeline.named_steps['preprocessor'].transform(df_features)\n"
+                "knn = pipeline.named_steps['knn']\n\n"
+                "distances, indices = knn.kneighbors([X_transformed[42]], n_neighbors=11)\n"
+                "neighbor_indices = indices[0][1:]  # Retirer le film lui-même\n"
                 "```\n\n"
-                "**🎨 Bonus : On peut réordonner l'affichage**\n"
-                "Les 10 films sont déjà triés par similarité, mais on peut aussi les trier par note IMDb "
-                "pour mettre les meilleurs en premier (sans changer la recherche de similarité)."
+                "Distance cosine = angle entre vecteurs → Angle petit = Films similaires"
             )
 
-        
+            # ÉTAPE 6
+            st.subheader("Étape 6 — Calcul de la similarité", divider= True)
+            st.markdown(
+                "**Pourquoi calculer la similarité ?**\n\n"
+                "KNN retourne des distances, on veut des similarités pour l'utilisateur :\n"
+                "```python\n"
+                "similarite = 1 - distance\n\n"
+                "# distance = 0.12 → similarite = 88% ✅\n"
+                "# distance = 0.75 → similarite = 25% ❌\n\n"
+                "recommendations['similarite'] = 1 - neighbor_distances\n"
+                "```\n\n"
+                "**Relation avec KNN :**\n"
+                "KNN trouve voisins → Calcule distances → 1-distance = similarité → Affichage"
+            )
+
+            # ÉTAPE 7
+            st.subheader("Étape 7 — Récupérer et afficher", divider= True)
+            st.markdown(
+                "```python\n"
+                "def get_recommendations_knn(df, movie_index, n=10):\n"
+                "    engine = build_knn_simple(df)\n"
+                "    pipeline = engine['pipeline']\n"
+                "    X_transformed = pipeline.named_steps['preprocessor'].transform(engine['df_features'])\n"
+                "    knn = pipeline.named_steps['knn']\n"
+                "    \n"
+                "    distances, indices = knn.kneighbors([X_transformed[movie_index]], n_neighbors=n+1)\n"
+                "    neighbor_indices = indices[0][1:]\n"
+                "    \n"
+                "    recommendations = df.iloc[neighbor_indices].copy()\n"
+                "    recommendations['similarite'] = 1 - distances[0][1:]\n"
+                "    return recommendations.head(n)\n"
+                "```"
+            )
+
+            # ÉTAPE 8
+            st.subheader("Étape 8 — Applications du KNN : 3 cas d'usage différents", divider= True)
+            st.markdown(
+                "Le MÊME modèle KNN est utilisé de 3 façons différentes dans l'application :\n\n"
+                "---\n\n"
+                "### 1️⃣ Recherche par film (Films similaires)\n\n"
+                "**Cas d'usage** : L'utilisateur sélectionne UN film, on recommande des films similaires\n\n"
+                "**Fonctionnement** :\n"
+                "```python\n"
+                "# Utilisateur choisit 'Inception'\n"
+                "film_index = df[df['titre'] == 'Inception'].index[0]  # Position : 42\n\n"
+                "# KNN cherche les voisins de CE film précis\n"
+                "distances, indices = knn.kneighbors(\n"
+                "    [X_transformed[film_index]],  # Vecteur d'Inception\n"
+                "    n_neighbors=11\n"
+                ")\n\n"
+                "# Résultat : Films similaires à Inception\n"
+                "# → Interstellar, The Dark Knight, The Prestige (tous Nolan)\n"
+                "```\n\n"
+                "**Logique** :\n"
+                "- Point de départ : UN film connu\n"
+                "- Recherche : Quels autres films ont un vecteur similaire ?\n"
+                "- Base de comparaison : Les 177 features du film (genres, année, durée, réalisateur, acteurs)\n\n"
+                "---\n\n"
+                "### 2️⃣ Recherche par acteur\n\n"
+                "**Cas d'usage** : L'utilisateur cherche des films avec UN acteur spécifique\n\n"
+                "**Fonctionnement** :\n"
+                "```python\n"
+                "# Utilisateur cherche 'Tom Hanks'\n"
+                "films_tom_hanks = df[\n"
+                "    df['acteurs'].apply(lambda x: 'Tom Hanks' in x if isinstance(x, list) else False)\n"
+                "]\n\n"
+                "# Prendre UN film de référence (ex : le plus populaire)\n"
+                "film_reference = films_tom_hanks.sort_values('note', ascending=False).iloc[0]\n"
+                "film_index = film_reference.name\n\n"
+                "# KNN cherche les voisins de CE film\n"
+                "distances, indices = knn.kneighbors([X_transformed[film_index]], n_neighbors=50)\n\n"
+                "# Filtrer pour garder SEULEMENT les films avec Tom Hanks\n"
+                "recommendations = df.iloc[indices[0]]\n"
+                "recommendations_filtered = recommendations[\n"
+                "    recommendations['acteurs'].apply(lambda x: 'Tom Hanks' in x)\n"
+                "]\n"
+                "```\n\n"
+                "**Logique** :\n"
+                "- Point de départ : UN film de Tom Hanks (le plus populaire)\n"
+                "- Recherche : Autres films similaires\n"
+                "- Filtrage APRÈS : Ne garder que ceux avec Tom Hanks\n"
+                "- Résultat : Films Tom Hanks similaires au film de référence\n\n"
+                "**Pourquoi cette approche ?**\n"
+                "- On ne peut pas créer un vecteur fictif 'Tom Hanks'\n"
+                "- On utilise un VRAI film comme point de départ\n"
+                "- Le KNN trouve des films similaires (même époque, mêmes genres...)\n"
+                "- Le filtrage garantit que Tom Hanks est présent\n\n"
+                "**Exemple** :\n"
+                "- Film de référence : *Forrest Gump* (Drama, Romance • 1994 • Tom Hanks)\n"
+                "- KNN trouve : Cast Away, The Green Mile, Saving Private Ryan\n"
+                "- Tous ont Tom Hanks + genres/époque similaires\n\n"
+                "---\n\n"
+                "### 3️⃣ Films favoris (Recommandations personnalisées)\n\n"
+                "**Cas d'usage** : L'utilisateur a aimé PLUSIEURS films, on recommande des films qu'il pourrait aimer\n\n"
+                "**Fonctionnement** :\n"
+                "```python\n"
+                "# Utilisateur a aimé 5 films\n"
+                "films_favoris = ['Inception', 'The Dark Knight', 'Interstellar', 'The Matrix', 'Blade Runner 2049']\n\n"
+                "# Récupérer les indices\n"
+                "indices_favoris = df[df['titre'].isin(films_favoris)].index\n\n"
+                "# MÉTHODE : CENTROÏDE (vecteur moyen)\n"
+                "vecteurs_favoris = X_transformed[indices_favoris]\n"
+                "vecteur_moyen = vecteurs_favoris.mean(axis=0)  # Moyenne des 5 vecteurs\n\n"
+                "# KNN cherche les voisins du vecteur moyen\n"
+                "distances, indices = knn.kneighbors(\n"
+                "    [vecteur_moyen],  # Point fictif = moyenne des goûts\n"
+                "    n_neighbors=50\n"
+                ")\n"
+                "```\n\n"
+                "**Logique** :\n"
+                "- Point de départ : Vecteur MOYEN des films aimés\n"
+                "- Représente le 'profil de goût' de l'utilisateur\n"
+                "- KNN trouve des films proches de ce profil moyen\n\n"
+                "**Exemple vecteur moyen** :\n"
+                "```python\n"
+                "# Inception :    [1, 0, 1, 1, ..., 1, 0]  (Action, Sci-Fi, Nolan)\n"
+                "# Matrix :       [1, 0, 1, 0, ..., 0, 1]  (Action, Sci-Fi)\n"
+                "# Dark Knight :  [1, 1, 0, 1, ..., 1, 0]  (Action, Crime, Nolan)\n"
+                "#                 ↓  ↓  ↓  ↓       ↓  ↓\n"
+                "# Moyenne :      [1, 0.3, 0.7, 0.7, ..., 0.7, 0.3]\n"
+                "#                ↑ Action probable (100%)\n"
+                "#                   ↑ Un peu Crime (30%)\n"
+                "#                      ↑ Beaucoup Sci-Fi (70%)\n"
+                "```\n\n"
+                "Le vecteur moyen crée un 'film fictif' qui représente les goûts !\n\n"
+                "---\n\n"
+                "### 📊 Comparaison des 3 méthodes\n\n"
+            )
+            
+            # Tableau comparatif
+            comparison_data = {
+                "Critère": [
+                    "Point de départ",
+                    "Nombre de vecteurs",
+                    "Calcul KNN",
+                    "Filtrage après",
+                    "Personnalisation",
+                    "Use case"
+                ],
+                "Par film": [
+                    "1 film connu",
+                    "1 vecteur réel",
+                    "kneighbors([vecteur_film])",
+                    "Aucun",
+                    "❌ Non",
+                    "Explorer similaires"
+                ],
+                "Par acteur": [
+                    "1 film de l'acteur",
+                    "1 vecteur réel",
+                    "kneighbors([vecteur_film])",
+                    "✅ Garde acteur",
+                    "❌ Non",
+                    "Découvrir filmographie"
+                ],
+                "Films favoris": [
+                    "N films aimés",
+                    "N vecteurs → moyenne",
+                    "kneighbors([vecteur_moyen])",
+                    "✅ Retire favoris",
+                    "✅✅ Oui",
+                    "Recommandations perso"
+                ]
+            }
+            
+            st.table(comparison_data)
+            
+            st.markdown(
+                "\n**Points clés** :\n"
+                "1. **Films similaires** : Simple, direct, 1 film → voisins\n"
+                "2. **Par acteur** : 1 film de référence + filtrage pour garantir l'acteur\n"
+                "3. **Favoris** : Agrégation de goûts → vecteur moyen = profil utilisateur\n\n"
+                "---\n\n"
+                "### 💡 Pourquoi 3 approches pour 1 modèle ?\n\n"
+                "**Le KNN est flexible** :\n"
+                "- Peut chercher voisins d'UN point (film)\n"
+                "- Peut chercher voisins d'un point MOYEN (profil)\n"
+                "- Peut être combiné avec filtrage\n\n"
+                "**Même modèle, 3 questions différentes** :\n"
+                "- 'Quels films ressemblent à Inception ?' → Par film\n"
+                "- 'Quels films Tom Hanks similaires ?' → Par acteur\n"
+                "- 'Qu'est-ce que je vais aimer ?' → Favoris\n\n"
+                "**Avantage** : 1 seul modèle à entraîner, 3 fonctionnalités !\n"
+            )
+
+            # EXEMPLE
+            st.markdown("---")
+            st.markdown("**Exemple : Inception**")
+            st.markdown(
+                "Film : Inception (Action, Sci-Fi, Thriller • 2010 • 148 min)\n\n"
+                "Résultats :\n"
+                "1. Interstellar (88%) → Même réalisateur (Nolan)\n"
+                "2. The Dark Knight (85%) → Même réalisateur (Nolan)\n"
+                "3. The Prestige (82%) → Même réalisateur (Nolan)"
+            )
+
+            # FORCES ET LIMITES
+            st.markdown("---")
+            st.subheader("Forces et limites")
+            st.markdown("**Forces** : Rapide, simple, explicable, flexible")
+            st.markdown("**Limites** : Cold start, popularité, contexte, subjectivité")
+
+
     st.markdown("### Découvrez des films qui correspondent à vos goûts")
     
     # Extraction utilisateur actuel depuis st.session_state (géré par système auth)
@@ -1618,10 +1868,11 @@ elif page == "💡 Recommandations":
                             titre_display = get_display_title(film, prefer_french=True, include_year=True)
                             note = film.get('note', film.get('averageRating', 0))
                             
-                            # Genres
+                            # Genres (traduits en français)
                             genres = film.get('genre', [])
                             if isinstance(genres, list) and len(genres) > 0:
-                                genres_str = ', '.join(genres[:3])
+                                genres_traduits = translate_genres(genres[:3])
+                                genres_str = ', '.join(genres_traduits)
                             else:
                                 genres_str = str(film.get('genres', ''))
                             
@@ -1810,9 +2061,10 @@ elif page == "💡 Recommandations":
                             if votes > 0:
                                 st.caption(f"🗳️ {votes:,} votes")
                             
-                            # Genres
+                            # Genres (traduits en français)
                             if 'genre' in movie.index and isinstance(movie['genre'], list) and len(movie['genre']) > 0:
-                                genres_str = " · ".join(movie['genre'][:3])
+                                genres_traduits = translate_genres(movie['genre'][:3])
+                                genres_str = " · ".join(genres_traduits)
                                 st.caption(f"🎭 {genres_str}")
                             
                             # Acteurs si recherche acteur
@@ -1898,9 +2150,10 @@ elif page == "💡 Recommandations":
                             if votes > 0:
                                 st.caption(f"🗳️ {votes:,} votes")
                             
-                            # Genres
+                            # Genres (traduits en français)
                             if 'genre' in movie.index and isinstance(movie['genre'], list) and len(movie['genre']) > 0:
-                                genres_str = " · ".join(movie['genre'][:3])
+                                genres_traduits = translate_genres(movie['genre'][:3])
+                                genres_str = " · ".join(genres_traduits)
                                 st.caption(f"🎭 {genres_str}")
                             
                             # Bouton pour voir similaires
@@ -1958,7 +2211,7 @@ elif page == "❤️ Mes Films Favoris":
     # ==========================================
     # EXPANDER PÉDAGOGIQUE : EXPLICATION SYSTÈME PROFILS
     # ==========================================
-    with st.expander("📚 Comprendre le système de profils utilisateurs", expanded=False, icon="👤"):
+    with st.expander("Comprendre le système de profils utilisateurs", expanded=False, icon="👤"):
         col1, col2, col3 = st.columns([1, 8, 1])
 
         with col2:
@@ -2396,7 +2649,7 @@ elif page == "🗺️ Cinémas Creuse":
     # ==========================================
     # EXPANDER PÉDAGOGIQUE : EXPLICATION CARTOGRAPHIE
     # ==========================================
-    with st.expander("📚 Comprendre le système de cartographie interactive", expanded=False, icon="🗺️"):
+    with st.expander("Comprendre le système de cartographie interactive", expanded=False, icon="🗺️"):
         col1, col2, col3 = st.columns([1, 8, 1])
 
         with col2:
@@ -2681,10 +2934,11 @@ elif page == "🗺️ Cinémas Creuse":
                             if film.get('duree'):
                                 st.caption(f"⏱️ {film['duree']} min")
                             
-                            # Genres
+                            # Genres (traduits en français)
                             genres = film.get('genres', [])
                             if genres:
-                                st.caption(f"🎭 {', '.join(genres[:2])}")
+                                genres_traduits = translate_genres(genres[:2])
+                                st.caption(f"🎭 {', '.join(genres_traduits)}")
                             
                             # EXPANDER pour les détails complets
                             with st.expander("📄 Plus d'infos"):
@@ -2761,7 +3015,7 @@ elif page == "🎭 Activités Annexes":
     # ==========================================
     # EXPANDER PÉDAGOGIQUE : EXPLICATION SYSTÈME ÉVÉNEMENTS
     # ==========================================
-    with st.expander("📚 Comprendre le système d'événements culturels", expanded=False, icon="🎭"):
+    with st.expander("Comprendre le système dévénements culturels", expanded=False, icon="🎭"):
         col1, col2, col3 = st.columns([1, 8, 1])
 
         with col2:
@@ -2940,7 +3194,7 @@ elif page == "📊 Espace B2B":
     # ==========================================
     # EXPANDER PÉDAGOGIQUE : EXPLICATION ANALYSE BUSINESS
     # ==========================================
-    with st.expander("📚 Comprendre l'analyse de marché B2B", expanded=False, icon="📊"):
+    with st.expander("Comprendre lanalyse de marché B2B", expanded=False, icon="📊"):
         col1, col2, col3 = st.columns([1, 8, 1])
 
         with col2:

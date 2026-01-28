@@ -672,12 +672,93 @@ def get_project_root():
     return Path(__file__).resolve().parent.parent
 
 
+# ==========================================
+# TRADUCTION GENRES EN FRANÇAIS
+# ==========================================
+GENRES_FR = {
+    'Action': 'Action',
+    'Adult': 'Adulte',
+    'Adventure': 'Aventure',
+    'Animation': 'Animation',
+    'Biography': 'Biographie',
+    'Comedy': 'Comédie',
+    'Crime': 'Crime',
+    'Documentary': 'Documentaire',
+    'Drama': 'Drame',
+    'Family': 'Familial',
+    'Fantasy': 'Fantastique',
+    'Film-Noir': 'Film Noir',
+    'Game-Show': 'Jeu Télévisé',
+    'History': 'Histoire',
+    'Horror': 'Horreur',
+    'Music': 'Musique',
+    'Musical': 'Comédie Musicale',
+    'Mystery': 'Mystère',
+    'News': 'Actualités',
+    'Reality-TV': 'Télé-Réalité',
+    'Romance': 'Romance',
+    'Sci-Fi': 'Science-Fiction',
+    'Short': 'Court-Métrage',
+    'Sport': 'Sport',
+    'Talk-Show': 'Talk-Show',
+    'Thriller': 'Thriller',
+    'War': 'Guerre',
+    'Western': 'Western'
+}
+
+
+def translate_genre(genre_en: str) -> str:
+    """
+    Traduit un genre de l'anglais vers le français
+    
+    Args:
+        genre_en: Genre en anglais (ex: "Drama")
+    
+    Returns:
+        Genre en français (ex: "Drame")
+    """
+    return GENRES_FR.get(genre_en, genre_en)
+
+
+def translate_genres(genres: list) -> list:
+    """
+    Traduit une liste de genres de l'anglais vers le français
+    
+    Args:
+        genres: Liste de genres en anglais (ex: ['Drama', 'Action'])
+    
+    Returns:
+        Liste de genres en français (ex: ['Drame', 'Action'])
+    """
+    if not genres:
+        return []
+    return [translate_genre(g) for g in genres]
+
+
 def format_genre(genre):
-    """Formate le genre pour affichage"""
+    """
+    Formate le genre pour affichage EN FRANÇAIS
+    
+    Args:
+        genre: Liste de genres ['Drama', 'Action'] ou string 'Drama,Action'
+    
+    Returns:
+        String formaté en français: 'Drame, Action'
+    """
     if isinstance(genre, list):
-        return ', '.join(genre) if genre else 'Non spécifié'
+        if not genre:
+            return 'Non spécifié'
+        # Traduire chaque genre
+        genres_fr = [translate_genre(g) for g in genre]
+        return ', '.join(genres_fr)
     elif isinstance(genre, str):
-        return genre.replace(',', ', ')
+        # Si c'est une string avec virgules, séparer et traduire
+        if ',' in genre:
+            genres = [g.strip() for g in genre.split(',')]
+            genres_fr = [translate_genre(g) for g in genres]
+            return ', '.join(genres_fr)
+        else:
+            return translate_genre(genre)
     return 'Non spécifié'
 
 

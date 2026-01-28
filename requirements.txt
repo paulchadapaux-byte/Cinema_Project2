@@ -1,33 +1,24 @@
-# ==========================================
-# Cinema Creuse - Requirements
-# ==========================================
+# Dépendances Python pour Cinema Creuse
 
-# Core Data Manipulation
-pandas==2.1.4
-numpy==1.26.2
-pyarrow==14.0.1
+# Framework principal
+streamlit>=1.28.0
 
-# Visualization
-matplotlib==3.8.2
-seaborn==0.13.0
-plotly==5.18.0
+# Data science et ML
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
 
-# Machine Learning
-scikit-learn==1.3.2
+# Visualisation
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.14.0
 
-# Web Application
-streamlit==1.29.0
-streamlit-folium==0.16.0
+# API et web
+requests>=2.31.0
 
-# Maps
-folium==0.15.1
+# Traitement de données
+python-dateutil>=2.8.2
 
-# Excel Support
-openpyxl==3.1.2
-
-# HTTP Requests (API TMDb)
-requests==2.31.0
-
-# Optional: Jupyter Notebook (for data preparation)
-# jupyter==1.0.0
-# ipykernel==6.27.1
+# Optionnel (si utilisé)
+# folium>=0.14.0  # Pour les cartes
+# pillow>=10.0.0  # Pour les images
