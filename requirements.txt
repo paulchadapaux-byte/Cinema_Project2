@@ -13,12 +13,16 @@ matplotlib>=3.7.0
 seaborn>=0.12.0
 plotly>=5.14.0
 
+# Cartes interactives
+folium>=0.14.0
+streamlit-folium>=0.15.0
+
 # API et web
 requests>=2.31.0
 
 # Traitement de données
 python-dateutil>=2.8.2
 
-# Optionnel (si utilisé)
-# folium>=0.14.0  # Pour les cartes
-# pillow>=10.0.0  # Pour les images
+# Images (optionnel)
+pillow>=10.0.0
+
