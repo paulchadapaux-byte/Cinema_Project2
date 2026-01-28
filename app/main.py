@@ -189,7 +189,7 @@ def load_imdb_data():
         df = df.reset_index(drop=True)
         
         # Stats de chargement
-        st.sidebar.info(f"📊 {len(df):,} films chargés")
+        st.sidebar.info(f"📊 {len(df):,} films IMDB")
         
         return df
         
@@ -635,12 +635,12 @@ if page == "🏠 Accueil":
         📁 **Source** : IMDb public datasets
         
         📊 **Contenu** :
-        - 10M+ de titres catalogués (filmes, séries, etc.)
+        - 10M+ de titres catalogués (films, séries, etc.)
         - 5M+ titres retenus :
             - Distribution : France
             - Type : Film
             - Années 1990-2026
-        - 55K+ films disposant des informations nécessaires (acteurs, réalisateur, votes, titre français, etc.)
+        - 22K- films disposant des informations nécessaires (acteurs, réalisateur, votes, titre français, etc.)
         
         🎯 **Usage** :
         - Base de recommandations
@@ -679,98 +679,6 @@ if page == "🏠 Accueil":
         except:
             st.metric("Films TMDb", "18 (cache)")
     
-    # ==========================================
-    # SECTION 3 : WORKFLOW VISUEL (DIAGRAMME MATPLOTLIB)
-    # Création diagramme de flux avec matplotlib.patches :
-    # - FancyBboxPatch() pour boîtes arrondies (sources, traitement, sorties)
-    # - ax.annotate() avec arrowprops pour flèches directionnelles
-    # Flux : IMDb/TMDb → Nettoyage/Enrichissement → Algorithmes → Pages UI
-    # ==========================================
-    
-    st.markdown("---")
-    st.header("🔄 Workflow de traitement")
-    
-    # Construction diagramme vectoriel avec matplotlib (évite images externes)
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
-    
-    fig, ax = plt.subplots(figsize=(14, 7))
-    ax.set_xlim(0, 10)
-    ax.set_ylim(0, 10)
-    ax.axis('off')
-    
-    # Couleurs
-    c_imdb = '#F5C518'
-    c_tmdb = '#01D277'
-    c_proc = '#5D8A66'
-    c_out = '#2F5233'
-    
-    # Sources
-    ax.add_patch(FancyBboxPatch((0.3, 7.5), 1.8, 1.2, boxstyle="round,pad=0.1", 
-                                 fc=c_imdb, ec='black', lw=2))
-    ax.text(1.2, 8.1, 'IMDb', ha='center', fontsize=14, fontweight='bold')
-    ax.text(1.2, 7.8, f"{len(df_movies):,} films", ha='center', fontsize=9)
-    
-    ax.add_patch(FancyBboxPatch((0.3, 5.8), 1.8, 1.2, boxstyle="round,pad=0.1", 
-                                 fc=c_tmdb, ec='black', lw=2))
-    ax.text(1.2, 6.4, 'TMDb API', ha='center', fontsize=14, fontweight='bold')
-    ax.text(1.2, 6.1, f"{len(films)} films mis à jour en temps réel", ha='center', fontsize=9)
-    
-    # Traitement
-    ax.add_patch(FancyBboxPatch((3, 7), 2, 1.5, boxstyle="round,pad=0.1", 
-                                 fc=c_proc, ec='black', lw=2))
-    ax.text(4, 8.1, 'Nettoyage', ha='center', fontsize=12, fontweight='bold', color='white')
-    ax.text(4, 7.7, '• Doublons', ha='center', fontsize=8, color='white')
-    ax.text(4, 7.4, '• Normalisation', ha='center', fontsize=8, color='white')
-    ax.text(4, 7.1, '• Validation', ha='center', fontsize=8, color='white')
-    
-    ax.add_patch(FancyBboxPatch((3, 5.3), 2, 1.5, boxstyle="round,pad=0.1", 
-                                 fc=c_proc, ec='black', lw=2))
-    ax.text(4, 6.4, 'Enrichissement', ha='center', fontsize=12, fontweight='bold', color='white')
-    ax.text(4, 6, '• Affiches', ha='center', fontsize=8, color='white')
-    ax.text(4, 5.7, '• Synopsis', ha='center', fontsize=8, color='white')
-    ax.text(4, 5.4, '• Casting', ha='center', fontsize=8, color='white')
-    
-    # Algorithmes
-    ax.add_patch(FancyBboxPatch((6.2, 7.2), 1.6, 1, boxstyle="round,pad=0.1", 
-                                 fc='#3498DB', ec='black', lw=2))
-    ax.text(7, 7.9, 'KNN', ha='center', fontsize=11, fontweight='bold', color='white')
-    ax.text(7, 7.5, 'Recommandations', ha='center', fontsize=8, color='white')
-    
-    ax.add_patch(FancyBboxPatch((6.2, 5.8), 1.6, 1, boxstyle="round,pad=0.1", 
-                                 fc='#3498DB', ec='black', lw=2))
-    ax.text(7, 6.5, 'Similarité', ha='center', fontsize=11, fontweight='bold', color='white')
-    ax.text(7, 6.1, 'Cosinus', ha='center', fontsize=8, color='white')
-    
-    # Pages finales
-    pages = [
-        ('Films', 1.5, 2),
-        ('Recommand.', 3.3, 2),
-        ('Cinémas', 5.1, 2),
-        ('B2B', 6.9, 2)
-    ]
-    
-    for nom, x, y in pages:
-        ax.add_patch(FancyBboxPatch((x, y), 1.4, 0.8, boxstyle="round,pad=0.05", 
-                                     fc=c_out, ec='black', lw=2))
-        ax.text(x + 0.7, y + 0.4, nom, ha='center', fontsize=9, fontweight='bold', color='white')
-    
-    # Flèches
-    arrow = dict(arrowstyle='->', lw=2, color='black')
-    ax.annotate('', xy=(3, 7.75), xytext=(2.1, 8), arrowprops=arrow)
-    ax.annotate('', xy=(3, 6.1), xytext=(2.1, 6.4), arrowprops=arrow)
-    ax.annotate('', xy=(6.2, 7.7), xytext=(5, 7.7), arrowprops=arrow)
-    ax.annotate('', xy=(6.2, 6.3), xytext=(5, 6.1), arrowprops=arrow)
-    
-    # Vers pages
-    ax.annotate('', xy=(2.2, 2.4), xytext=(4, 5.3), arrowprops=arrow)
-    ax.annotate('', xy=(4, 2.4), xytext=(6.8, 5.8), arrowprops=arrow)
-    ax.annotate('', xy=(5.8, 2.4), xytext=(7.2, 5.8), arrowprops=arrow)
-    ax.annotate('', xy=(7.6, 2.4), xytext=(4, 5.3), arrowprops=arrow)
-    
-    plt.tight_layout()
-    st.pyplot(fig)
-    plt.close()
     
     # ==========================================
     # SECTION 4 : STATISTIQUES CATALOGUE (MÉTRIQUES + GRAPHIQUES)
@@ -827,7 +735,7 @@ if page == "🏠 Accueil":
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
         st.pyplot(fig)
-        plt.close()
+        plt.close() 
     
     # Calcul top genres via comptage dict manuel (évite dépendance collections.Counter)
     # Tri par nombre d'occurrences décroissant → top 10
@@ -3430,12 +3338,10 @@ elif page == "📊 Espace B2B":
                         var_name='Gender', 
                         value_name='Population'
                     )
-                    
+
                     # Calculer les pourcentages
-                    total_pop = df_pop_long.groupby('Age')['Population'].sum()
-                    df_pop_long['Percentage'] = df_pop_long.apply(
-                        lambda row: (row['Population'] / total_pop[row['Age']]) * 100, 
-                        axis=1
+                    total_pop = df_pop_long['Population'].sum()
+                    df_pop_long['Percentage'] = (df_pop_long['Population'] / total_pop * 100
                     )
                     
                     # Graphique
